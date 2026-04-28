@@ -145,6 +145,36 @@ export function getDescendantIds(project: MindProject, nodeId: string) {
   return ids;
 }
 
+export function sanitizeProject(project: MindProject): MindProject {
+  const reachable = new Set<string>();
+
+  function visit(id: string) {
+    const node = project.nodes[id];
+    if (!node || reachable.has(id)) return;
+    reachable.add(id);
+    node.children.forEach(visit);
+  }
+
+  visit(project.rootId);
+
+  const nodes = Object.fromEntries(
+    Object.entries(project.nodes)
+      .filter(([id]) => reachable.has(id))
+      .map(([id, node]) => [
+        id,
+        {
+          ...node,
+          children: node.children.filter((childId) => reachable.has(childId)),
+        },
+      ])
+  );
+
+  return {
+    ...project,
+    nodes: nodes[project.rootId] ? nodes : project.nodes,
+  };
+}
+
 export function layoutMindmap(project: MindProject): MindmapLayout {
   const positioned = new Map<string, PositionedNode>();
   const depthGap = 286;

@@ -25,6 +25,7 @@ import {
   getDescendantIds,
   getPath,
   layoutMindmap,
+  sanitizeProject,
   touchNode,
 } from '@/lib/mindmap';
 
@@ -39,7 +40,7 @@ function loadProjects() {
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as MindProject[]) : createSeedProjects();
+    return raw ? (JSON.parse(raw) as MindProject[]).map(sanitizeProject) : createSeedProjects();
   } catch {
     return createSeedProjects();
   }
