@@ -1,5 +1,6 @@
 import { Feather } from '@expo/vector-icons';
 import { useMemo, useRef, useState } from 'react';
+import Svg, { Path } from 'react-native-svg';
 import {
   Platform,
   Pressable,
@@ -148,15 +149,17 @@ export default function MindmapHome() {
 
   function updateSelectedNode(partial: Partial<MindNode>) {
     if (!selectedNode) return;
-    updateProject((project) =>
-      bumpProject({
+    updateProject((project) => {
+      const nextNode = touchNode({ ...selectedNode, ...partial });
+      return bumpProject({
         ...project,
+        title: selectedNode.id === project.rootId ? nextNode.text : project.title,
         nodes: {
           ...project.nodes,
-          [selectedNode.id]: touchNode({ ...selectedNode, ...partial }),
+          [selectedNode.id]: nextNode,
         },
-      })
-    );
+      });
+    });
   }
 
   function findPosition(nodeId: string) {
@@ -441,9 +444,7 @@ export default function MindmapHome() {
             transform: [{ scale: zoom }],
           } as object,
         ]}>
-        {layout.edges.map((edge) => (
-          <Connector key={`${edge.from.id}-${edge.to.id}`} from={edge.from} to={edge.to} />
-        ))}
+        <ConnectorLayer width={layout.width} height={layout.height} edges={layout.edges} />
         {layout.nodes.map((node) => (
           <Pressable
             key={node.id}
@@ -728,28 +729,43 @@ export default function MindmapHome() {
   );
 }
 
-function Connector({ from, to }: { from: MindNode & { x: number; y: number }; to: MindNode & { x: number; y: number } }) {
-  const startX = from.x + nodeWidth;
-  const startY = from.y + nodeHeight / 2;
-  const endX = to.x;
-  const endY = to.y + nodeHeight / 2;
-  const midX = startX + (endX - startX) / 2;
-
+function ConnectorLayer({
+  width,
+  height,
+  edges,
+}: {
+  width: number;
+  height: number;
+  edges: {
+    from: MindNode & { x: number; y: number };
+    to: MindNode & { x: number; y: number };
+  }[];
+}) {
   return (
-    <>
-      <View style={[styles.line, { left: startX, top: startY, width: midX - startX }]} />
-      <View style={[styles.line, { left: midX, top: endY, width: endX - midX }]} />
-      <View
-        style={[
-          styles.verticalLine,
-          {
-            left: midX,
-            top: Math.min(startY, endY),
-            height: Math.abs(endY - startY),
-          },
-        ]}
-      />
-    </>
+    <Svg width={width} height={height} style={styles.connectorCanvas} pointerEvents="none">
+      {edges.map((edge) => {
+        const startX = edge.from.x + nodeWidth;
+        const startY = edge.from.y + nodeHeight / 2;
+        const endX = edge.to.x;
+        const endY = edge.to.y + nodeHeight / 2;
+        const distance = Math.max(48, Math.abs(endX - startX) * 0.45);
+        const d = [
+          `M ${startX} ${startY}`,
+          `C ${startX + distance} ${startY}, ${endX - distance} ${endY}, ${endX} ${endY}`,
+        ].join(' ');
+
+        return (
+          <Path
+            key={`${edge.from.id}-${edge.to.id}`}
+            d={d}
+            stroke="#B8C6D9"
+            strokeWidth={2.5}
+            fill="none"
+            strokeLinecap="round"
+          />
+        );
+      })}
+    </Svg>
   );
 }
 
@@ -1064,15 +1080,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 6,
   },
-  line: {
+  connectorCanvas: {
     position: 'absolute',
-    height: 2,
-    backgroundColor: '#B9C4D3',
-  },
-  verticalLine: {
-    position: 'absolute',
-    width: 2,
-    backgroundColor: '#B9C4D3',
+    left: 0,
+    top: 0,
   },
   inspector: {
     width: 360,
@@ -1137,7 +1148,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   noteInput: {
-    minHeight: 76,
+    minHeight: 160,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#D8E0EA',
