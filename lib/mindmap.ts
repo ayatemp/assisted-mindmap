@@ -1,10 +1,20 @@
-export type NodeKind = 'theme' | 'idea' | 'question' | 'evidence' | 'risk';
+export type NodeKind = string;
+export type NodeAuthor = 'user' | 'ai';
+export type NodeDisplay = 'node' | 'memo';
+
+export type NodeTag = {
+  id: NodeKind;
+  label: string;
+  color: string;
+};
 
 export type MindNode = {
   id: string;
   text: string;
   note: string;
   kind: NodeKind;
+  author: NodeAuthor;
+  display: NodeDisplay;
   children: string[];
   position?: {
     x: number;
@@ -21,6 +31,7 @@ export type MindProject = {
   summary: string;
   rootId: string;
   nodes: Record<string, MindNode>;
+  tags: NodeTag[];
   createdAt: string;
   updatedAt: string;
 };
@@ -40,11 +51,34 @@ export type MindmapLayout = {
 
 const now = () => new Date().toISOString();
 
+export const defaultNodeTags: NodeTag[] = [
+  { id: 'theme', label: 'テーマ', color: '#111827' },
+  { id: 'idea', label: 'アイデア', color: '#0F766E' },
+  { id: 'question', label: '問い', color: '#2563EB' },
+  { id: 'evidence', label: '検証', color: '#7C3AED' },
+  { id: 'risk', label: 'リスク', color: '#DC2626' },
+  { id: 'memo', label: 'メモ', color: '#D97706' },
+];
+
+export const nodeSizes = {
+  node: { width: 228, height: 82 },
+  memo: { width: 320, height: 132 },
+} satisfies Record<NodeDisplay, { width: number; height: number }>;
+
+export function getNodeSize(node: Pick<MindNode, 'display'>) {
+  return nodeSizes[node.display] ?? nodeSizes.node;
+}
+
 export function createId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function createNode(text: string, kind: NodeKind = 'idea'): MindNode {
+export function createNode(
+  text: string,
+  kind: NodeKind = 'idea',
+  author: NodeAuthor = 'user',
+  display: NodeDisplay = 'node'
+): MindNode {
   const timestamp = now();
 
   return {
@@ -52,6 +86,8 @@ export function createNode(text: string, kind: NodeKind = 'idea'): MindNode {
     text: text.trim() || '新しいノード',
     note: '',
     kind,
+    author,
+    display,
     children: [],
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -60,7 +96,7 @@ export function createNode(text: string, kind: NodeKind = 'idea'): MindNode {
 }
 
 export function createProject(title: string, summary = ''): MindProject {
-  const root = createNode(title, 'theme');
+  const root = createNode(title, 'theme', 'user');
   const timestamp = now();
 
   return {
@@ -69,6 +105,7 @@ export function createProject(title: string, summary = ''): MindProject {
     summary: summary.trim(),
     rootId: root.id,
     nodes: { [root.id]: root },
+    tags: defaultNodeTags,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -80,10 +117,10 @@ export function createSeedProjects(): MindProject[] {
     'pseudo ground truthとYOLOを起点に、研究仮説・既存手法・実験設計を広げる。'
   );
   const pseudoRoot = pseudo.nodes[pseudo.rootId];
-  const existing = createNode('既存手法の整理', 'question');
+  const existing = createNode('既存手法の整理', 'question', 'ai');
   existing.note = '教師あり、半教師あり、self-training、teacher-studentの系統で分けて見る。';
-  const uncertainty = createNode('疑似ラベルの信頼度推定', 'idea');
-  const experiments = createNode('検証プロトコル', 'evidence');
+  const uncertainty = createNode('疑似ラベルの信頼度推定', 'idea', 'ai');
+  const experiments = createNode('検証プロトコル', 'evidence', 'ai');
   pseudoRoot.children = [existing.id, uncertainty.id, experiments.id];
   pseudo.nodes = {
     ...pseudo.nodes,
@@ -98,8 +135,8 @@ export function createSeedProjects(): MindProject[] {
     'LLMを使った事業アイデアを、顧客課題・差別化・検証方法に分解する。'
   );
   const businessRoot = business.nodes[business.rootId];
-  const customer = createNode('誰の痛みを解くか', 'question');
-  const wedge = createNode('最初の導入先', 'idea');
+  const customer = createNode('誰の痛みを解くか', 'question', 'ai');
+  const wedge = createNode('最初の導入先', 'idea', 'ai');
   businessRoot.children = [customer.id, wedge.id];
   business.nodes = {
     ...business.nodes,
@@ -147,6 +184,9 @@ export function getDescendantIds(project: MindProject, nodeId: string) {
 
 export function sanitizeProject(project: MindProject): MindProject {
   const reachable = new Set<string>();
+  const normalizeAuthor = (author: unknown): NodeAuthor => (author === 'ai' ? 'ai' : 'user');
+  const normalizeDisplay = (display: unknown): NodeDisplay => (display === 'memo' ? 'memo' : 'node');
+  const tags = normalizeTags(project.tags);
 
   function visit(id: string) {
     const node = project.nodes[id];
@@ -164,6 +204,9 @@ export function sanitizeProject(project: MindProject): MindProject {
         id,
         {
           ...node,
+          author: normalizeAuthor(node.author),
+          display: normalizeDisplay(node.display),
+          kind: tags.some((tag) => tag.id === node.kind) ? node.kind : 'idea',
           children: node.children.filter((childId) => reachable.has(childId)),
         },
       ])
@@ -171,8 +214,22 @@ export function sanitizeProject(project: MindProject): MindProject {
 
   return {
     ...project,
+    tags,
     nodes: nodes[project.rootId] ? nodes : project.nodes,
   };
+}
+
+export function normalizeTags(tags?: NodeTag[]) {
+  const merged = new Map<string, NodeTag>();
+  defaultNodeTags.forEach((tag) => merged.set(tag.id, tag));
+  tags?.forEach((tag) => {
+    const id = String(tag.id || '').trim();
+    const label = String(tag.label || '').trim();
+    const color = /^#[0-9A-Fa-f]{6}$/.test(tag.color) ? tag.color : '#64748B';
+    if (!id || !label) return;
+    merged.set(id, { id, label, color });
+  });
+  return Array.from(merged.values());
 }
 
 export function layoutMindmap(project: MindProject): MindmapLayout {
@@ -221,8 +278,8 @@ export function layoutMindmap(project: MindProject): MindmapLayout {
       .map((child) => ({ from: node, to: child }))
   );
 
-  const width = Math.max(920, ...nodes.map((node) => node.x + 260));
-  const height = Math.max(620, ...nodes.map((node) => node.y + 110));
+  const width = Math.max(920, ...nodes.map((node) => node.x + getNodeSize(node).width + 32));
+  const height = Math.max(620, ...nodes.map((node) => node.y + getNodeSize(node).height + 32));
 
   return { nodes, edges, width, height };
 }
@@ -354,8 +411,9 @@ export function createAssistantSeed(project: MindProject, nodeId: string) {
     : context.includes('llm') || context.includes('企業') || context.includes('事業')
       ? businessSeeds
       : generalSeeds;
+  const usableKinds = project.tags.map((tag) => tag.id).filter((id) => id !== 'theme' && id !== 'memo');
   const existingKinds = new Set(Object.values(project.nodes).map((item) => item.kind));
-  const missingKind = (['question', 'evidence', 'risk', 'idea'] as NodeKind[]).find(
+  const missingKind = usableKinds.find(
     (kind) => !existingKinds.has(kind)
   );
   const cursor = node?.hintCursor ?? 0;
@@ -364,11 +422,13 @@ export function createAssistantSeed(project: MindProject, nodeId: string) {
     : -1;
   const index = firstCandidateIndex >= 0 && cursor === 0 ? firstCandidateIndex : cursor % bank.length;
   const seed = bank[index];
+  const kind = usableKinds.includes(seed.kind) ? seed.kind : missingKind || usableKinds[0] || 'idea';
   const siblingTexts = node?.children.map((childId) => project.nodes[childId]?.text).filter(Boolean) ?? [];
   const duplicateOffset = siblingTexts.filter((text) => text?.startsWith(seed.text)).length;
 
   return {
     ...seed,
+    kind,
     text: duplicateOffset > 0 ? `${seed.text} ${duplicateOffset + 1}` : seed.text,
   };
 }
