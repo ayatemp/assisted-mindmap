@@ -6,6 +6,10 @@ export type MindNode = {
   note: string;
   kind: NodeKind;
   children: string[];
+  position?: {
+    x: number;
+    y: number;
+  };
   createdAt: string;
   updatedAt: string;
   hintCursor: number;
@@ -152,17 +156,28 @@ export function layoutMindmap(project: MindProject): MindmapLayout {
   function place(id: string, depth: number): number {
     const node = project.nodes[id];
     if (!node) return row * rowGap;
+    const childIds = node.children.filter((childId) => Boolean(project.nodes[childId]));
 
-    if (node.children.length === 0) {
+    if (childIds.length === 0) {
       const y = startY + row * rowGap;
       row += 1;
-      positioned.set(id, { ...node, x: startX + depth * depthGap, y, depth });
+      positioned.set(id, {
+        ...node,
+        x: node.position?.x ?? startX + depth * depthGap,
+        y: node.position?.y ?? y,
+        depth,
+      });
       return y;
     }
 
-    const childYs = node.children.map((childId) => place(childId, depth + 1));
+    const childYs = childIds.map((childId) => place(childId, depth + 1));
     const y = childYs.reduce((sum, value) => sum + value, 0) / childYs.length;
-    positioned.set(id, { ...node, x: startX + depth * depthGap, y, depth });
+    positioned.set(id, {
+      ...node,
+      x: node.position?.x ?? startX + depth * depthGap,
+      y: node.position?.y ?? y,
+      depth,
+    });
     return y;
   }
 
@@ -220,6 +235,112 @@ export function createAssistantHint(project: MindProject, nodeId: string) {
   const focus = node ? `いま選んでいる「${node.text}」について、` : '';
 
   return `${focus}${base}`;
+}
+
+const pseudoSeeds = [
+  {
+    text: '既存pseudo-label手法との差分',
+    note: 'teacher-student、self-training、confidence thresholdingと比べて、どこを新規性にするかを切り分ける。',
+    kind: 'question' as NodeKind,
+  },
+  {
+    text: '疑似GTの品質を測る指標',
+    note: 'mAPだけでなく、ラベルノイズ率、box品質、クラス別信頼度、学習安定性を評価候補にする。',
+    kind: 'evidence' as NodeKind,
+  },
+  {
+    text: 'YOLOが失敗するケース収集',
+    note: '小物体、遮蔽、ドメイン差、背景類似など、疑似GT改善が効く失敗パターンを先に定義する。',
+    kind: 'risk' as NodeKind,
+  },
+  {
+    text: '疑似GT生成のアルゴリズム案',
+    note: '複数モデル合議、時系列/拡張一致性、信頼度校正、低信頼boxの再推定を候補にする。',
+    kind: 'idea' as NodeKind,
+  },
+  {
+    text: '最小実験セット',
+    note: '既存データセットで小さく再現できる比較実験と、独自価値を見る追加実験を分ける。',
+    kind: 'evidence' as NodeKind,
+  },
+];
+
+const businessSeeds = [
+  {
+    text: '最初に刺す顧客セグメント',
+    note: '誰が今すぐ困っていて、既存ツールでは何を諦めているのかを1つに絞る。',
+    kind: 'question' as NodeKind,
+  },
+  {
+    text: 'LLMである必然性',
+    note: '検索、要約、自動化、意思決定支援のうち、LLMだから勝てる部分を明文化する。',
+    kind: 'idea' as NodeKind,
+  },
+  {
+    text: 'PoCで見るべき成功条件',
+    note: 'ユーザーが継続利用したくなる行動指標と、導入前後で減る作業時間を定義する。',
+    kind: 'evidence' as NodeKind,
+  },
+  {
+    text: '導入の障壁',
+    note: 'データ持ち出し、権限管理、既存業務フロー、コスト説明のどこが詰まりそうかを洗う。',
+    kind: 'risk' as NodeKind,
+  },
+];
+
+const generalSeeds = [
+  {
+    text: '前提仮説',
+    note: 'この枝が成立するために暗黙に置いている仮説を1つ書き出す。',
+    kind: 'question' as NodeKind,
+  },
+  {
+    text: '反証される条件',
+    note: 'どんな結果が出たら、この考えを捨てるべきかを先に決める。',
+    kind: 'risk' as NodeKind,
+  },
+  {
+    text: '検証方法',
+    note: 'このアイデアを観察・実験・比較で確かめるなら、最初に何を見るかを決める。',
+    kind: 'evidence' as NodeKind,
+  },
+  {
+    text: '具体例',
+    note: '抽象的な主張を1つの事例、ユーザー、失敗例に落とし込む。',
+    kind: 'idea' as NodeKind,
+  },
+];
+
+export function createAssistantSeed(project: MindProject, nodeId: string) {
+  const node = project.nodes[nodeId];
+  const path = getPath(project, nodeId);
+  const allText = Object.values(project.nodes)
+    .flatMap((item) => [item.text, item.note])
+    .join(' ')
+    .toLowerCase();
+  const context = `${project.title} ${project.summary} ${path.map((item) => item.text).join(' ')} ${allText}`;
+  const bank = context.includes('pseudogt') || context.includes('pseudo') || context.includes('yolo')
+    ? pseudoSeeds
+    : context.includes('llm') || context.includes('企業') || context.includes('事業')
+      ? businessSeeds
+      : generalSeeds;
+  const existingKinds = new Set(Object.values(project.nodes).map((item) => item.kind));
+  const missingKind = (['question', 'evidence', 'risk', 'idea'] as NodeKind[]).find(
+    (kind) => !existingKinds.has(kind)
+  );
+  const cursor = node?.hintCursor ?? 0;
+  const firstCandidateIndex = missingKind
+    ? bank.findIndex((seed) => seed.kind === missingKind)
+    : -1;
+  const index = firstCandidateIndex >= 0 && cursor === 0 ? firstCandidateIndex : cursor % bank.length;
+  const seed = bank[index];
+  const siblingTexts = node?.children.map((childId) => project.nodes[childId]?.text).filter(Boolean) ?? [];
+  const duplicateOffset = siblingTexts.filter((text) => text?.startsWith(seed.text)).length;
+
+  return {
+    ...seed,
+    text: duplicateOffset > 0 ? `${seed.text} ${duplicateOffset + 1}` : seed.text,
+  };
 }
 
 export function bumpProject(project: MindProject): MindProject {

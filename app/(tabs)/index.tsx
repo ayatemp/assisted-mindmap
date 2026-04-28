@@ -1,5 +1,5 @@
 import { Feather } from '@expo/vector-icons';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -17,7 +17,7 @@ import {
   MindProject,
   NodeKind,
   bumpProject,
-  createAssistantHint,
+  createAssistantSeed,
   createNode,
   createProject,
   createSeedProjects,
@@ -31,6 +31,8 @@ import {
 const STORAGE_KEY = 'assisted-mindmap-projects-v1';
 const nodeWidth = 228;
 const nodeHeight = 82;
+const childOffsetX = 286;
+const childOffsetY = 112;
 
 function loadProjects() {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return createSeedProjects();
@@ -75,6 +77,15 @@ export default function MindmapHome() {
   const [selectedNodeId, setSelectedNodeId] = useState(activeProject?.rootId ?? '');
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [quickChildText, setQuickChildText] = useState('');
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const dragRef = useRef<{
+    nodeId: string;
+    startPageX: number;
+    startPageY: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
   const { width } = useWindowDimensions();
   const compact = width < 920;
 
@@ -85,8 +96,6 @@ export default function MindmapHome() {
     [selectedProject]
   );
   const selectedPath = selectedProject && selectedNode ? getPath(selectedProject, selectedNode.id) : [];
-  const assistantHint =
-    selectedProject && selectedNode ? createAssistantHint(selectedProject, selectedNode.id) : '';
 
   function commitProjects(nextProjects: MindProject[]) {
     setProjects(nextProjects);
@@ -130,10 +139,26 @@ export default function MindmapHome() {
     );
   }
 
-  function addChildToNode(parentId: string, text?: string, kind: NodeKind = 'idea') {
+  function findPosition(nodeId: string) {
+    const positioned = layout?.nodes.find((node) => node.id === nodeId);
+    const node = selectedProject?.nodes[nodeId];
+    return {
+      x: node?.position?.x ?? positioned?.x ?? 32,
+      y: node?.position?.y ?? positioned?.y ?? 42,
+    };
+  }
+
+  function addChildToNode(parentId: string, text?: string, kind: NodeKind = 'idea', note = '') {
     const parentNode = selectedProject?.nodes[parentId];
     if (!parentNode) return;
     const child = createNode(text || quickChildText || '新しい枝', kind);
+    const parentPosition = findPosition(parentId);
+    const siblingCount = parentNode.children.length;
+    child.note = note;
+    child.position = {
+      x: parentPosition.x + childOffsetX,
+      y: parentPosition.y + (siblingCount - Math.max(parentNode.children.length - 1, 0) / 2) * childOffsetY,
+    };
     updateProject((project) => {
       const parent = project.nodes[parentId];
       return bumpProject({
@@ -156,8 +181,32 @@ export default function MindmapHome() {
 
   function addAiBranch(nodeId: string) {
     if (!selectedProject) return;
-    const hint = createAssistantHint(selectedProject, nodeId).replace(/^いま選んでいる「.*?」について、/, '');
-    addChildToNode(nodeId, hint, 'question');
+    const parentNode = selectedProject.nodes[nodeId];
+    if (!parentNode) return;
+    const seed = createAssistantSeed(selectedProject, nodeId);
+    const child = createNode(seed.text, seed.kind);
+    const parentPosition = findPosition(nodeId);
+    child.note = seed.note;
+    child.position = {
+      x: parentPosition.x + childOffsetX,
+      y: parentPosition.y + (parentNode.children.length + 0.2) * childOffsetY,
+    };
+    updateProject((project) => {
+      const parent = project.nodes[nodeId];
+      return bumpProject({
+        ...project,
+        nodes: {
+          ...project.nodes,
+          [nodeId]: touchNode({
+            ...parent,
+            hintCursor: parent.hintCursor + 1,
+            children: [...parent.children, child.id],
+          }),
+          [child.id]: child,
+        },
+      });
+    });
+    setSelectedNodeId(child.id);
   }
 
   function addSibling() {
@@ -197,7 +246,7 @@ export default function MindmapHome() {
           ...nodes,
           [parentId]: touchNode({
             ...parent,
-            children: parent.children.filter((id) => id !== selectedNode.id),
+            children: parent.children.filter((id) => id !== nodeId),
           }),
         },
       });
@@ -212,11 +261,6 @@ export default function MindmapHome() {
     deleteNode(selectedNode.id);
   }
 
-  function cycleHint() {
-    if (!selectedNode) return;
-    updateSelectedNode({ hintCursor: selectedNode.hintCursor + 1 });
-  }
-
   function renameProjectTitle(text: string) {
     updateProject((project) =>
       bumpProject({
@@ -228,6 +272,55 @@ export default function MindmapHome() {
         },
       })
     );
+  }
+
+  function moveNode(nodeId: string, x: number, y: number) {
+    updateProject((project) => {
+      const node = project.nodes[nodeId];
+      if (!node) return project;
+      return bumpProject({
+        ...project,
+        nodes: {
+          ...project.nodes,
+          [nodeId]: touchNode({
+            ...node,
+            position: {
+              x: Math.max(0, Math.round(x)),
+              y: Math.max(0, Math.round(y)),
+            },
+          }),
+        },
+      });
+    });
+  }
+
+  function beginDrag(event: GestureResponderEvent, nodeId: string) {
+    event.stopPropagation();
+    const position = findPosition(nodeId);
+    dragRef.current = {
+      nodeId,
+      startPageX: event.nativeEvent.pageX,
+      startPageY: event.nativeEvent.pageY,
+      startX: position.x,
+      startY: position.y,
+      moved: false,
+    };
+    setDraggingNodeId(nodeId);
+    setSelectedNodeId(nodeId);
+  }
+
+  function updateDrag(event: GestureResponderEvent) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const nextX = drag.startX + event.nativeEvent.pageX - drag.startPageX;
+    const nextY = drag.startY + event.nativeEvent.pageY - drag.startPageY;
+    drag.moved = true;
+    moveNode(drag.nodeId, nextX, nextY);
+  }
+
+  function endDrag() {
+    dragRef.current = null;
+    setDraggingNodeId(null);
   }
 
   if (!selectedProject || !layout || !selectedNode) {
@@ -321,8 +414,11 @@ export default function MindmapHome() {
             style={styles.canvasViewport}
             contentContainerStyle={{ width: layout.width, height: layout.height }}
             horizontal
+            scrollEnabled={!draggingNodeId}
             nestedScrollEnabled>
-            <ScrollView contentContainerStyle={{ width: layout.width, height: layout.height }}>
+            <ScrollView
+              contentContainerStyle={{ width: layout.width, height: layout.height }}
+              scrollEnabled={!draggingNodeId}>
               <View style={[styles.canvas, { width: layout.width, height: layout.height }]}>
                 {layout.edges.map((edge) => (
                   <Connector key={`${edge.from.id}-${edge.to.id}`} from={edge.from} to={edge.to} />
@@ -339,6 +435,7 @@ export default function MindmapHome() {
                         borderColor: node.id === selectedNode.id ? kindColor(node.kind) : '#D6DDE8',
                       },
                       node.id === selectedNode.id && styles.mindNodeSelected,
+                      draggingNodeId === node.id && styles.mindNodeDragging,
                     ]}>
                     <View style={styles.nodeHeader}>
                       <View style={styles.nodeKindGroup}>
@@ -346,6 +443,17 @@ export default function MindmapHome() {
                         <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
                       </View>
                       <View style={styles.nodeActions}>
+                        <View
+                          accessibilityLabel="ノードを移動"
+                          onStartShouldSetResponder={() => true}
+                          onMoveShouldSetResponder={() => true}
+                          onResponderGrant={(event) => beginDrag(event, node.id)}
+                          onResponderMove={updateDrag}
+                          onResponderRelease={endDrag}
+                          onResponderTerminate={endDrag}
+                          style={styles.nodeActionButton}>
+                          <Feather name="move" size={13} color="#334155" />
+                        </View>
                         <Pressable
                           accessibilityLabel="AIで伸ばす"
                           onPress={(event: GestureResponderEvent) => {
@@ -430,7 +538,7 @@ export default function MindmapHome() {
               <View style={styles.actionGrid}>
                 <ActionButton icon="corner-down-right" label="子を追加" onPress={() => addChild()} />
                 <ActionButton icon="plus-square" label="同階層" onPress={addSibling} disabled={selectedNode.id === selectedProject.rootId} />
-                <ActionButton icon="refresh-cw" label="問い更新" onPress={cycleHint} />
+                <ActionButton icon="zap" label="AIで伸ばす" onPress={() => addAiBranch(selectedNode.id)} />
                 <ActionButton icon="trash-2" label="削除" onPress={deleteSelectedNode} danger disabled={selectedNode.id === selectedProject.rootId} />
               </View>
 
@@ -445,25 +553,6 @@ export default function MindmapHome() {
                 />
                 <Pressable style={styles.primaryButton} onPress={() => addChild()}>
                   <Text style={styles.primaryButtonText}>追加</Text>
-                </Pressable>
-              </View>
-
-              <View style={styles.assistantPanel}>
-                <View style={styles.assistantHeader}>
-                  <View style={styles.assistantMark}>
-                    <Feather name="zap" size={16} color="#F8FAFC" />
-                  </View>
-                  <View>
-                    <Text style={styles.assistantTitle}>Codex comment</Text>
-                    <Text style={styles.assistantSub}>この枝を広げるための一言</Text>
-                  </View>
-                </View>
-                <Text style={styles.assistantText}>{assistantHint}</Text>
-                <Pressable
-                  style={styles.assistantButton}
-                  onPress={() => addAiBranch(selectedNode.id)}>
-                  <Feather name="message-square" size={16} color="#0F172A" />
-                  <Text style={styles.assistantButtonText}>AIで伸ばす</Text>
                 </Pressable>
               </View>
             </ScrollView>
@@ -691,6 +780,9 @@ const styles = StyleSheet.create({
   mindNodeSelected: {
     borderWidth: 2,
   },
+  mindNodeDragging: {
+    opacity: 0.9,
+  },
   nodeHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -885,59 +977,6 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '900',
-  },
-  assistantPanel: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#BCD7FF',
-    backgroundColor: '#EFF6FF',
-    padding: 14,
-    gap: 12,
-  },
-  assistantHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  assistantMark: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: '#2563EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  assistantTitle: {
-    color: '#0F172A',
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  assistantSub: {
-    color: '#52647A',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  assistantText: {
-    color: '#0F172A',
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: '700',
-  },
-  assistantButton: {
-    minHeight: 40,
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#C9DAF7',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  assistantButtonText: {
-    color: '#0F172A',
-    fontSize: 13,
     fontWeight: '900',
   },
   emptyState: {
