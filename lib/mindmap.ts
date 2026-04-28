@@ -62,10 +62,22 @@ export const defaultNodeTags: NodeTag[] = [
 
 export const nodeSizes = {
   node: { width: 228, height: 82 },
-  memo: { width: 320, height: 132 },
+  memo: { width: 460, height: 44 },
 } satisfies Record<NodeDisplay, { width: number; height: number }>;
 
-export function getNodeSize(node: Pick<MindNode, 'display'>) {
+export function getNodeSize(node: Pick<MindNode, 'display'> & Partial<Pick<MindNode, 'text'>>) {
+  if (node.display === 'memo') {
+    const normalized = String(node.text ?? '').replace(/\r/g, '');
+    const explicitLines = normalized.split('\n');
+    const estimatedLines = explicitLines.reduce((count, line) => {
+      const length = Math.max(1, Array.from(line).length);
+      return count + Math.ceil(length / 34);
+    }, 0);
+    return {
+      width: nodeSizes.memo.width,
+      height: Math.max(nodeSizes.memo.height, estimatedLines * 18 + 24),
+    };
+  }
   return nodeSizes[node.display] ?? nodeSizes.node;
 }
 

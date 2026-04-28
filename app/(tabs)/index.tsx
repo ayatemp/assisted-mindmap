@@ -62,12 +62,40 @@ const webResizeHandleStyle =
         cursor: 'col-resize',
       } as object)
     : {};
+const webNodeNoSelectStyle =
+  Platform.OS === 'web'
+    ? ({
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+      } as object)
+    : {};
+const webMoveCursorStyle =
+  Platform.OS === 'web'
+    ? ({
+        cursor: 'move',
+      } as object)
+    : {};
+const webGrabCursorStyle =
+  Platform.OS === 'web'
+    ? ({
+        cursor: 'grab',
+      } as object)
+    : {};
+const webGrabbingCursorStyle =
+  Platform.OS === 'web'
+    ? ({
+        cursor: 'grabbing',
+      } as object)
+    : {};
 const PANEL_STORAGE_KEY = 'assisted-mindmap-panels-v1';
 const sidebarMinWidth = 232;
 const sidebarMaxWidth = 420;
 const inspectorMinWidth = 300;
 const inspectorMaxWidth = 520;
 const tagColorOptions = ['#0F766E', '#2563EB', '#7C3AED', '#DC2626', '#D97706', '#0891B2', '#475569'];
+const memoLineBottomOffset = 3;
+const memoLineWidth = 2.5;
+const canvasDragPanSensitivity = 1.85;
 
 function loadPanelSizes() {
   if (Platform.OS !== 'web' || typeof window === 'undefined') {
@@ -149,6 +177,9 @@ export default function MindmapHome() {
   const [newTagLabel, setNewTagLabel] = useState('');
   const [quickChildText, setQuickChildText] = useState('');
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const [panningCanvas, setPanningCanvas] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [inspectorMode, setInspectorMode] = useState<'edit' | 'settings'>('edit');
   const [zoom, setZoom] = useState(1);
   const [sidebarWidth, setSidebarWidth] = useState(initialPanels.sidebar);
   const [inspectorWidth, setInspectorWidth] = useState(initialPanels.inspector);
@@ -156,6 +187,15 @@ export default function MindmapHome() {
   const zoomRef = useRef(1);
   const applyZoomRef = useRef<(nextZoom: number, focus?: { x: number; y: number }) => void>(() => {});
   const pendingZoomScrollRef = useRef<{ left: number; top: number } | null>(null);
+  const wheelZoomRef = useRef<{
+    frame: number | null;
+    multiplier: number;
+    focus: { x: number; y: number };
+  }>({
+    frame: null,
+    multiplier: 1,
+    focus: { x: 0, y: 0 },
+  });
   const dragRef = useRef<{
     nodeId: string;
     startPageX: number;
@@ -163,6 +203,12 @@ export default function MindmapHome() {
     startX: number;
     startY: number;
     moved: boolean;
+  } | null>(null);
+  const panRef = useRef<{
+    startPageX: number;
+    startPageY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
   } | null>(null);
   const resizeRef = useRef<{
     panel: 'sidebar' | 'inspector';
@@ -277,6 +323,7 @@ export default function MindmapHome() {
     setActiveProjectId('');
     setSelectedNodeId('');
     setQuickChildText('');
+    setInspectorMode('edit');
   }
 
   function addProject() {
@@ -333,8 +380,8 @@ export default function MindmapHome() {
     );
   }
 
-  function findOpenPosition(x: number, y: number, display: NodeDisplay = 'node') {
-    const size = nodeSizes[display];
+  function findOpenPosition(x: number, y: number, display: NodeDisplay = 'node', text = '') {
+    const size = getNodeSize({ display, text });
     const existing =
       layout?.nodes.map((node) => {
         const nodeSize = getNodeSize(node);
@@ -382,7 +429,8 @@ export default function MindmapHome() {
     child.position = findOpenPosition(
       parentPosition.x + childOffsetX,
       parentPosition.y + siblingCount * childOffsetY,
-      display
+      display,
+      child.text
     );
     updateProject((project) => {
       const parent = project.nodes[parentId];
@@ -419,7 +467,9 @@ export default function MindmapHome() {
     child.note = seed.note;
     child.position = findOpenPosition(
       parentPosition.x + childOffsetX,
-      parentPosition.y + (parentNode.children.length + 0.2) * childOffsetY
+      parentPosition.y + (parentNode.children.length + 0.2) * childOffsetY,
+      child.display,
+      child.text
     );
     updateProject((project) => {
       const parent = project.nodes[nodeId];
@@ -445,7 +495,7 @@ export default function MindmapHome() {
     if (!parentId) return;
     const sibling = createNode('同じ階層の新しい枝', defaultChildKind(), 'user');
     const selectedPosition = findPosition(selectedNode.id);
-    sibling.position = findOpenPosition(selectedPosition.x, selectedPosition.y + childOffsetY);
+    sibling.position = findOpenPosition(selectedPosition.x, selectedPosition.y + childOffsetY, sibling.display, sibling.text);
     updateProject((project) => {
       const parent = project.nodes[parentId];
       const index = parent.children.indexOf(selectedNode.id);
@@ -588,6 +638,37 @@ export default function MindmapHome() {
     setDraggingNodeId(null);
   }
 
+  function beginCanvasPan(event: GestureResponderEvent) {
+    const node = canvasScrollerRef.current;
+    if (!node) return;
+    panRef.current = {
+      startPageX: event.nativeEvent.pageX,
+      startPageY: event.nativeEvent.pageY,
+      startScrollLeft: node.scrollLeft ?? 0,
+      startScrollTop: node.scrollTop ?? 0,
+    };
+    setPanningCanvas(true);
+  }
+
+  function updateCanvasPan(event: GestureResponderEvent) {
+    const pan = panRef.current;
+    const node = canvasScrollerRef.current;
+    if (!pan || !node) return;
+    node.scrollLeft = pan.startScrollLeft - (event.nativeEvent.pageX - pan.startPageX) * canvasDragPanSensitivity;
+    node.scrollTop = pan.startScrollTop - (event.nativeEvent.pageY - pan.startPageY) * canvasDragPanSensitivity;
+  }
+
+  function endCanvasPan() {
+    panRef.current = null;
+    setPanningCanvas(false);
+  }
+
+  function isCanvasBackgroundEvent(event: GestureResponderEvent) {
+    const nativeTarget = event.nativeEvent.target as unknown;
+    const currentTarget = event.currentTarget as unknown;
+    return nativeTarget === currentTarget;
+  }
+
   function startResize(panel: 'sidebar' | 'inspector', event: GestureResponderEvent) {
     if (Platform.OS !== 'web') return;
     event.stopPropagation();
@@ -641,6 +722,21 @@ export default function MindmapHome() {
     applyZoomRef.current = applyZoom;
   });
 
+  function scheduleWheelZoom(multiplier: number, focus: { x: number; y: number }) {
+    if (typeof window === 'undefined') return;
+    const pending = wheelZoomRef.current;
+    pending.multiplier *= multiplier;
+    pending.focus = focus;
+
+    if (pending.frame !== null) return;
+    pending.frame = window.requestAnimationFrame(() => {
+      const { multiplier: zoomMultiplier, focus: zoomFocus } = wheelZoomRef.current;
+      wheelZoomRef.current.frame = null;
+      wheelZoomRef.current.multiplier = 1;
+      applyZoomRef.current(clampZoom(zoomRef.current * zoomMultiplier), zoomFocus);
+    });
+  }
+
   function fitToCanvas() {
     if (!layout) return;
     const metrics = getScrollerMetrics();
@@ -680,6 +776,7 @@ export default function MindmapHome() {
 
     const node = canvasScrollerRef.current as HTMLElement | null;
     if (!node) return;
+    const wheelZoomState = wheelZoomRef.current;
 
     const handleWheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) {
@@ -691,8 +788,7 @@ export default function MindmapHome() {
 
       event.preventDefault();
       const rect = node.getBoundingClientRect();
-      const nextZoom = clampZoom(zoomRef.current * Math.exp(-event.deltaY * 0.0017));
-      applyZoomRef.current(nextZoom, {
+      scheduleWheelZoom(Math.exp(-event.deltaY * 0.0017), {
         x: event.clientX - rect.left,
         y: event.clientY - rect.top,
       });
@@ -712,13 +808,18 @@ export default function MindmapHome() {
       node.removeEventListener('gesturestart', blockGesture as EventListener);
       node.removeEventListener('gesturechange', blockGesture as EventListener);
       node.removeEventListener('gestureend', blockGesture as EventListener);
+      if (wheelZoomState.frame !== null) {
+        window.cancelAnimationFrame(wheelZoomState.frame);
+        wheelZoomState.frame = null;
+        wheelZoomState.multiplier = 1;
+      }
     };
-  }, [compact, layout]);
+  }, [compact]);
 
   function renderProjectHub() {
     return (
       <View style={styles.homeShell}>
-        <ScrollView contentContainerStyle={styles.homeContent}>
+        <ScrollView contentContainerStyle={[styles.homeContent, compact && styles.homeContentCompact]}>
           <View style={styles.homeHero}>
             <View style={styles.homeHeroCopy}>
               <View style={styles.homeBrandRow}>
@@ -738,7 +839,7 @@ export default function MindmapHome() {
           </View>
 
           <View style={styles.homeCommandBar}>
-            <View style={styles.homeCreateGroup}>
+            <View style={[styles.homeCreateGroup, compact && styles.homeCreateGroupCompact]}>
               <Feather name="plus-circle" size={18} color="#2563EB" />
               <TextInput
                 value={newProjectTitle}
@@ -753,7 +854,7 @@ export default function MindmapHome() {
               </Pressable>
             </View>
 
-            <View style={styles.homeSearch}>
+            <View style={[styles.homeSearch, compact && styles.homeSearchCompact]}>
               <Feather name="search" size={16} color="#64748B" />
               <TextInput
                 value={projectQuery}
@@ -811,8 +912,16 @@ export default function MindmapHome() {
 
     const canvasChildren = (
       <View
+        onStartShouldSetResponder={isCanvasBackgroundEvent}
+        onMoveShouldSetResponder={isCanvasBackgroundEvent}
+        onResponderGrant={beginCanvasPan}
+        onResponderMove={updateCanvasPan}
+        onResponderRelease={endCanvasPan}
+        onResponderTerminate={endCanvasPan}
         style={[
           styles.canvasWorld,
+          panningCanvas && styles.canvasWorldPanning,
+          Platform.OS === 'web' && (panningCanvas ? webGrabbingCursorStyle : webGrabCursorStyle),
           {
             width: contentWidth,
             height: contentHeight,
@@ -845,18 +954,26 @@ export default function MindmapHome() {
               <Pressable
                 key={node.id}
                 onPress={() => setSelectedNodeId(node.id)}
+                onHoverIn={() => setHoveredNodeId(node.id)}
+                onHoverOut={() => setHoveredNodeId((current) => (current === node.id ? null : current))}
                 style={[
                   styles.mindNode,
                   isMemo && styles.memoNode,
+                  webNodeNoSelectStyle,
                   {
                     left: node.x,
                     top: node.y,
                     width: size.width,
-                    minHeight: size.height,
-                    backgroundColor: isMemo ? '#FFF7ED' : authorPalette(node.author).background,
-                    borderColor: node.id === selectedNode?.id ? tagColor : authorPalette(node.author).border,
+                    minHeight: isMemo ? undefined : size.height,
+                    height: isMemo ? size.height : undefined,
+                    backgroundColor: isMemo ? 'transparent' : authorPalette(node.author).background,
+                    borderColor: isMemo
+                      ? 'transparent'
+                      : node.id === selectedNode?.id
+                        ? tagColor
+                        : authorPalette(node.author).border,
                   },
-                  node.id === selectedNode?.id && styles.mindNodeSelected,
+                  node.id === selectedNode?.id && !isMemo && styles.mindNodeSelected,
                   draggingNodeId === node.id && styles.mindNodeDragging,
                 ]}>
                 {[
@@ -874,50 +991,47 @@ export default function MindmapHome() {
                     onResponderMove={updateDrag}
                     onResponderRelease={endDrag}
                     onResponderTerminate={endDrag}
-                    style={[styles.nodeBorderDragHandle, style]}
+                    style={[styles.nodeBorderDragHandle, style, webMoveCursorStyle]}
                   />
                 ))}
-                <View style={styles.nodeHeader}>
-                  <View style={styles.nodeKindGroup}>
-                    <View style={[styles.kindDot, { backgroundColor: tagColor }]} />
-                    <Text style={styles.nodeKind}>{kindLabel(selectedProject?.tags, node.kind)}</Text>
-                    <View
-                      style={[
-                        styles.authorBadge,
-                        { backgroundColor: authorPalette(node.author).badgeBackground },
-                      ]}>
-                      <Text style={[styles.authorBadgeText, { color: authorPalette(node.author).badgeText }]}>
-                        {authorLabel(node.author)}
-                      </Text>
+                {!isMemo ? (
+                  <View style={styles.nodeHeader}>
+                    <View style={styles.nodeKindGroup}>
+                      <View style={[styles.kindDot, { backgroundColor: tagColor }]} />
+                      <Text style={styles.nodeKind}>{kindLabel(selectedProject?.tags, node.kind)}</Text>
+                      <View
+                        style={[
+                          styles.authorBadge,
+                          { backgroundColor: authorPalette(node.author).badgeBackground },
+                        ]}>
+                        <Text style={[styles.authorBadgeText, { color: authorPalette(node.author).badgeText }]}>
+                          {authorLabel(node.author)}
+                        </Text>
+                      </View>
                     </View>
                   </View>
-                  <View style={styles.nodeActions}>
-                    <Pressable
-                      accessibilityLabel="AIで伸ばす"
-                      onPress={(event: GestureResponderEvent) => {
-                        event.stopPropagation();
-                        addAiBranch(node.id);
-                      }}
-                      style={styles.nodeActionButton}>
-                      <Feather name="zap" size={13} color="#2563EB" />
-                      <Text style={styles.nodeActionText}>AI</Text>
-                    </Pressable>
-                    {node.id !== selectedProject?.rootId ? (
-                      <Pressable
-                        accessibilityLabel="ノードを削除"
-                        onPress={(event: GestureResponderEvent) => {
-                          event.stopPropagation();
-                          deleteNode(node.id);
-                        }}
-                        style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
-                        <Feather name="trash-2" size={13} color="#B91C1C" />
-                      </Pressable>
-                    ) : null}
+                ) : null}
+                {hoveredNodeId === node.id && node.id !== selectedProject?.rootId ? (
+                  <Pressable
+                    accessibilityLabel="ノードを削除"
+                    onPress={(event: GestureResponderEvent) => {
+                      event.stopPropagation();
+                      deleteNode(node.id);
+                    }}
+                    style={[styles.nodeHoverDeleteButton, isMemo && styles.memoHoverDeleteButton]}>
+                    <Feather name="trash-2" size={13} color="#B91C1C" />
+                  </Pressable>
+                ) : null}
+                {isMemo ? (
+                  <View style={styles.memoInline}>
+                    <Text style={styles.memoText}>{node.text}</Text>
+                    <View style={styles.memoUnderline} />
                   </View>
-                </View>
-                <Text style={[styles.nodeText, isMemo && styles.memoText]} numberOfLines={isMemo ? 8 : 2}>
-                  {node.text}
-                </Text>
+                ) : (
+                  <Text style={styles.nodeText} numberOfLines={2}>
+                    {node.text}
+                  </Text>
+                )}
                 {!isMemo && node.note ? (
                   <Text style={styles.nodeNote} numberOfLines={1}>
                     {node.note}
@@ -1002,7 +1116,9 @@ export default function MindmapHome() {
           />
         </View>
 
-        <ScrollView style={styles.projectList} contentContainerStyle={styles.projectListContent}>
+        <ScrollView
+          style={styles.projectList}
+          contentContainerStyle={[styles.projectListContent, compact && styles.projectListContentCompact]}>
           {filteredProjects.map((project) => {
             const active = project.id === selectedProject.id;
             return (
@@ -1025,12 +1141,12 @@ export default function MindmapHome() {
       {!compact ? <ResizeHandle onStart={(event) => startResize('sidebar', event)} /> : null}
 
       <View style={styles.workspace}>
-        <View style={styles.topbar}>
+        <View style={[styles.topbar, compact && styles.topbarCompact]}>
           <View style={styles.titleEditGroup}>
             <TextInput
               value={selectedProject.title}
               onChangeText={renameProjectTitle}
-              style={styles.projectTitleInput}
+              style={[styles.projectTitleInput, compact && styles.projectTitleInputCompact]}
             />
             <TextInput
               value={selectedProject.summary}
@@ -1040,15 +1156,15 @@ export default function MindmapHome() {
               style={styles.summaryInput}
             />
           </View>
-          <View style={styles.topbarStats}>
+          <View style={[styles.topbarStats, compact && styles.topbarStatsCompact]}>
             <Feather name="layers" size={16} color="#4B5563" />
             <Text style={styles.statText}>{Object.keys(selectedProject.nodes).length} nodes</Text>
           </View>
         </View>
 
         <View style={[styles.body, compact && styles.bodyCompact]}>
-          <View style={styles.canvasArea}>
-            <View style={styles.zoomControls}>
+          <View style={[styles.canvasArea, compact && styles.canvasAreaCompact]}>
+            <View style={[styles.zoomControls, compact && styles.zoomControlsCompact]}>
               <Pressable
                 accessibilityLabel="全体表示"
                 onPress={fitToCanvas}
@@ -1102,115 +1218,160 @@ export default function MindmapHome() {
                 ))}
               </View>
 
-              <Text style={styles.panelLabel}>選択中の枝</Text>
-              <TextInput
-                value={selectedNode.text}
-                onChangeText={(text) => updateSelectedNode({ text })}
-                multiline
-                style={styles.nodeInput}
-              />
-
-              <View style={styles.kindRow}>
-                {editableTags().map((tag) => (
-                  <Pressable
-                    key={tag.id}
-                    onPress={() => updateSelectedNode({ kind: tag.id })}
+              <View style={styles.inspectorModeRow}>
+                <Pressable
+                  onPress={() => setInspectorMode('edit')}
+                  style={[styles.inspectorModeButton, inspectorMode === 'edit' && styles.inspectorModeButtonActive]}>
+                  <Feather name="edit-3" size={14} color={inspectorMode === 'edit' ? '#FFFFFF' : '#334155'} />
+                  <Text style={[styles.inspectorModeText, inspectorMode === 'edit' && styles.inspectorModeTextActive]}>
+                    編集
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setInspectorMode('settings')}
+                  style={[styles.inspectorModeButton, inspectorMode === 'settings' && styles.inspectorModeButtonActive]}>
+                  <Feather name="settings" size={14} color={inspectorMode === 'settings' ? '#FFFFFF' : '#334155'} />
+                  <Text
                     style={[
-                      styles.kindButton,
-                      selectedNode.kind === tag.id && { backgroundColor: tag.color, borderColor: tag.color },
+                      styles.inspectorModeText,
+                      inspectorMode === 'settings' && styles.inspectorModeTextActive,
                     ]}>
-                    <Text style={[styles.kindButtonText, selectedNode.kind === tag.id && styles.kindButtonTextActive]}>
-                      {tag.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              <View style={styles.displayRow}>
-                {(['node', 'memo'] as NodeDisplay[]).map((display) => (
-                  <Pressable
-                    key={display}
-                    onPress={() => updateSelectedNode({ display, kind: display === 'memo' ? 'memo' : selectedNode.kind })}
-                    style={[styles.displayButton, selectedNode.display === display && styles.displayButtonActive]}>
-                    <Text style={[styles.displayButtonText, selectedNode.display === display && styles.displayButtonTextActive]}>
-                      {display === 'memo' ? 'メモ表示' : 'ノード表示'}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-
-              <TextInput
-                value={selectedNode.note}
-                onChangeText={(note) => updateSelectedNode({ note })}
-                multiline
-                placeholder="補足メモ、根拠、リンクなど"
-                placeholderTextColor="#8A93A3"
-                style={styles.noteInput}
-              />
-
-              <View style={styles.actionGrid}>
-                <ActionButton icon="corner-down-right" label="子を追加" onPress={() => addChild()} />
-                <ActionButton icon="plus-square" label="同階層" onPress={addSibling} disabled={selectedNode.id === selectedProject.rootId} />
-                <ActionButton icon="zap" label="AIで伸ばす" onPress={() => addAiBranch(selectedNode.id)} />
-                <ActionButton icon="file-text" label="メモ追加" onPress={addMemoBranch} />
-                <ActionButton icon="rotate-ccw" label="位置リセット" onPress={resetNodePositions} />
-                <ActionButton icon="trash-2" label="削除" onPress={deleteSelectedNode} danger disabled={selectedNode.id === selectedProject.rootId} />
-              </View>
-
-              <View style={styles.tagEditor}>
-                <Text style={styles.panelLabel}>タグ</Text>
-                {editableTags().map((tag) => (
-                  <View key={tag.id} style={styles.tagEditRow}>
-                    <View style={[styles.tagSwatch, { backgroundColor: tag.color }]} />
-                    <TextInput
-                      value={tag.label}
-                      onChangeText={(label) => updateTag(tag.id, { label: label || tag.label })}
-                      style={styles.tagNameInput}
-                    />
-                    <View style={styles.tagColorRow}>
-                      {tagColorOptions.slice(0, 5).map((color) => (
-                        <Pressable
-                          key={color}
-                          accessibilityLabel={`${tag.label}の色を変更`}
-                          onPress={() => updateTag(tag.id, { color })}
-                          style={[
-                            styles.tagColorButton,
-                            { backgroundColor: color },
-                            tag.color === color && styles.tagColorButtonActive,
-                          ]}
-                        />
-                      ))}
-                    </View>
-                  </View>
-                ))}
-                <View style={styles.addTagRow}>
-                  <TextInput
-                    value={newTagLabel}
-                    onChangeText={setNewTagLabel}
-                    placeholder="新しいタグ"
-                    placeholderTextColor="#8A93A3"
-                    style={styles.addTagInput}
-                    onSubmitEditing={addTag}
-                  />
-                  <Pressable style={styles.addTagButton} onPress={addTag}>
-                    <Feather name="plus" size={16} color="#FFFFFF" />
-                  </Pressable>
-                </View>
-              </View>
-
-              <View style={styles.quickAdd}>
-                <TextInput
-                  value={quickChildText}
-                  onChangeText={setQuickChildText}
-                  placeholder="この枝から伸ばす内容を書く"
-                  placeholderTextColor="#8A93A3"
-                  style={styles.quickAddInput}
-                  onSubmitEditing={() => addChild()}
-                />
-                <Pressable style={styles.primaryButton} onPress={() => addChild()}>
-                  <Text style={styles.primaryButtonText}>追加</Text>
+                    設定
+                  </Text>
                 </Pressable>
               </View>
+
+              {inspectorMode === 'edit' ? (
+                <>
+                  <Text style={styles.panelLabel}>選択中の枝</Text>
+                  <TextInput
+                    value={selectedNode.text}
+                    onChangeText={(text) => updateSelectedNode({ text })}
+                    multiline
+                    style={styles.nodeInput}
+                  />
+
+                  <View style={styles.kindRow}>
+                    {editableTags().map((tag) => (
+                      <Pressable
+                        key={tag.id}
+                        onPress={() => updateSelectedNode({ kind: tag.id })}
+                        style={[
+                          styles.kindButton,
+                          selectedNode.kind === tag.id && { backgroundColor: tag.color, borderColor: tag.color },
+                        ]}>
+                        <Text
+                          style={[styles.kindButtonText, selectedNode.kind === tag.id && styles.kindButtonTextActive]}>
+                          {tag.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <View style={styles.displayRow}>
+                    {(['node', 'memo'] as NodeDisplay[]).map((display) => (
+                      <Pressable
+                        key={display}
+                        onPress={() =>
+                          updateSelectedNode({ display, kind: display === 'memo' ? 'memo' : selectedNode.kind })
+                        }
+                        style={[styles.displayButton, selectedNode.display === display && styles.displayButtonActive]}>
+                        <Text
+                          style={[
+                            styles.displayButtonText,
+                            selectedNode.display === display && styles.displayButtonTextActive,
+                          ]}>
+                          {display === 'memo' ? 'メモ表示' : 'ノード表示'}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  <TextInput
+                    value={selectedNode.note}
+                    onChangeText={(note) => updateSelectedNode({ note })}
+                    multiline
+                    placeholder="補足メモ、根拠、リンクなど"
+                    placeholderTextColor="#8A93A3"
+                    style={styles.noteInput}
+                  />
+
+                  <View style={styles.actionGrid}>
+                    <ActionButton icon="corner-down-right" label="子を追加" onPress={() => addChild()} />
+                    <ActionButton
+                      icon="plus-square"
+                      label="同階層"
+                      onPress={addSibling}
+                      disabled={selectedNode.id === selectedProject.rootId}
+                    />
+                    <ActionButton icon="zap" label="AIで伸ばす" onPress={() => addAiBranch(selectedNode.id)} />
+                    <ActionButton icon="file-text" label="メモ追加" onPress={addMemoBranch} />
+                    <ActionButton icon="rotate-ccw" label="位置リセット" onPress={resetNodePositions} />
+                    <ActionButton
+                      icon="trash-2"
+                      label="削除"
+                      onPress={deleteSelectedNode}
+                      danger
+                      disabled={selectedNode.id === selectedProject.rootId}
+                    />
+                  </View>
+
+                  <View style={styles.quickAdd}>
+                    <TextInput
+                      value={quickChildText}
+                      onChangeText={setQuickChildText}
+                      placeholder="この枝から伸ばす内容を書く"
+                      placeholderTextColor="#8A93A3"
+                      style={styles.quickAddInput}
+                      onSubmitEditing={() => addChild()}
+                    />
+                    <Pressable style={styles.primaryButton} onPress={() => addChild()}>
+                      <Text style={styles.primaryButtonText}>追加</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.tagEditor}>
+                  <Text style={styles.panelLabel}>タグ設定</Text>
+                  {editableTags().map((tag) => (
+                    <View key={tag.id} style={styles.tagEditRow}>
+                      <View style={[styles.tagSwatch, { backgroundColor: tag.color }]} />
+                      <TextInput
+                        value={tag.label}
+                        onChangeText={(label) => updateTag(tag.id, { label: label || tag.label })}
+                        style={styles.tagNameInput}
+                      />
+                      <View style={styles.tagColorRow}>
+                        {tagColorOptions.slice(0, 5).map((color) => (
+                          <Pressable
+                            key={color}
+                            accessibilityLabel={`${tag.label}の色を変更`}
+                            onPress={() => updateTag(tag.id, { color })}
+                            style={[
+                              styles.tagColorButton,
+                              { backgroundColor: color },
+                              tag.color === color && styles.tagColorButtonActive,
+                            ]}
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  ))}
+                  <View style={styles.addTagRow}>
+                    <TextInput
+                      value={newTagLabel}
+                      onChangeText={setNewTagLabel}
+                      placeholder="新しいタグ"
+                      placeholderTextColor="#8A93A3"
+                      style={styles.addTagInput}
+                      onSubmitEditing={addTag}
+                    />
+                    <Pressable style={styles.addTagButton} onPress={addTag}>
+                      <Feather name="plus" size={16} color="#FFFFFF" />
+                    </Pressable>
+                  </View>
+                </View>
+              )}
             </ScrollView>
           </View>
         </View>
@@ -1247,15 +1408,30 @@ function ConnectorLayer({
     to: MindNode & { x: number; y: number };
   }[];
 }) {
+  const getAnchor = (node: MindNode & { x: number; y: number }, side: 'left' | 'right') => {
+    const size = getNodeSize(node);
+    if (node.display === 'memo') {
+      const lineY = node.y + size.height - memoLineBottomOffset;
+      return {
+        x: node.x + (side === 'right' ? size.width : 0),
+        y: lineY,
+      };
+    }
+    return {
+      x: node.x + (side === 'right' ? size.width : 0),
+      y: node.y + size.height / 2,
+    };
+  };
+
   return (
     <Svg width={width} height={height} style={styles.connectorCanvas} pointerEvents="none">
       {edges.map((edge) => {
-        const fromSize = getNodeSize(edge.from);
-        const toSize = getNodeSize(edge.to);
-        const startX = offsetX + edge.from.x + fromSize.width;
-        const startY = offsetY + edge.from.y + fromSize.height / 2;
-        const endX = offsetX + edge.to.x;
-        const endY = offsetY + edge.to.y + toSize.height / 2;
+        const start = getAnchor(edge.from, 'right');
+        const end = getAnchor(edge.to, 'left');
+        const startX = offsetX + start.x;
+        const startY = offsetY + start.y;
+        const endX = offsetX + end.x;
+        const endY = offsetY + end.y;
         const distance = Math.max(48, Math.abs(endX - startX) * 0.45);
         const d = [
           `M ${startX} ${startY}`,
@@ -1270,7 +1446,6 @@ function ConnectorLayer({
             strokeWidth={2.5}
             fill="none"
             strokeLinecap="round"
-            strokeDasharray={edge.to.display === 'memo' ? '6 7' : undefined}
           />
         );
       })}
@@ -1322,6 +1497,10 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 1180,
     alignSelf: 'center',
+  },
+  homeContentCompact: {
+    paddingHorizontal: 16,
+    paddingVertical: 18,
   },
   homeHero: {
     alignItems: 'flex-start',
@@ -1384,6 +1563,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
+  homeCreateGroupCompact: {
+    minWidth: '100%',
+  },
   homeCreateInput: {
     flex: 1,
     minHeight: 48,
@@ -1430,6 +1612,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+  },
+  homeSearchCompact: {
+    minWidth: '100%',
   },
   homeSearchInput: {
     flex: 1,
@@ -1513,7 +1698,8 @@ const styles = StyleSheet.create({
   },
   sidebarCompact: {
     width: '100%',
-    maxHeight: 210,
+    maxHeight: 188,
+    padding: 12,
   },
   resizeHandle: {
     width: 12,
@@ -1602,6 +1788,9 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingBottom: 20,
   },
+  projectListContentCompact: {
+    paddingBottom: 8,
+  },
   sidebarSearch: {
     minHeight: 40,
     borderRadius: 8,
@@ -1660,6 +1849,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 16,
   },
+  topbarCompact: {
+    minHeight: 78,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'flex-start',
+  },
   titleEditGroup: {
     flex: 1,
     gap: 8,
@@ -1669,6 +1864,9 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '800',
     padding: 0,
+  },
+  projectTitleInputCompact: {
+    fontSize: 20,
   },
   summaryInput: {
     color: '#4B5563',
@@ -1684,6 +1882,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
+  },
+  topbarStatsCompact: {
+    display: 'none',
   },
   statText: {
     color: '#4B5563',
@@ -1701,6 +1902,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#EEF3F9',
     position: 'relative',
+  },
+  canvasAreaCompact: {
+    minHeight: 430,
   },
   canvasViewport: {
     flex: 1,
@@ -1721,6 +1925,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
+  },
+  zoomControlsCompact: {
+    top: 10,
+    right: 10,
+    transform: [{ scale: 0.92 }],
+    transformOrigin: 'top right',
   },
   zoomButton: {
     width: 36,
@@ -1768,6 +1978,9 @@ const styles = StyleSheet.create({
     position: 'relative',
     backgroundColor: '#EEF3F9',
   },
+  canvasWorldPanning: {
+    opacity: 0.99,
+  },
   mindNode: {
     position: 'absolute',
     width: nodeWidth,
@@ -1778,8 +1991,8 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   memoNode: {
-    borderStyle: 'dashed',
-    padding: 14,
+    borderWidth: 0,
+    padding: 0,
   },
   mindNodeSelected: {
     borderWidth: 2,
@@ -1789,31 +2002,31 @@ const styles = StyleSheet.create({
   },
   nodeBorderDragHandle: {
     position: 'absolute',
-    zIndex: 4,
+    zIndex: 30,
   },
   nodeDragTop: {
     left: 0,
     right: 0,
-    top: -5,
-    height: 10,
+    top: -9,
+    height: 18,
   },
   nodeDragRight: {
     top: 0,
-    right: -5,
+    right: -9,
     bottom: 0,
-    width: 10,
+    width: 18,
   },
   nodeDragBottom: {
     left: 0,
     right: 0,
-    bottom: -5,
-    height: 10,
+    bottom: -9,
+    height: 18,
   },
   nodeDragLeft: {
     top: 0,
-    left: -5,
+    left: -9,
     bottom: 0,
-    width: 10,
+    width: 18,
   },
   nodeHeader: {
     flexDirection: 'row',
@@ -1847,6 +2060,24 @@ const styles = StyleSheet.create({
   nodeActionButtonDanger: {
     minWidth: 24,
     backgroundColor: '#FFF1F2',
+  },
+  nodeHoverDeleteButton: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: '#FFF1F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 40,
+  },
+  memoHoverDeleteButton: {
+    top: -8,
+    right: -8,
   },
   nodeActionText: {
     color: '#2563EB',
@@ -1886,7 +2117,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     lineHeight: 18,
-    color: '#7C2D12',
+    color: '#475569',
+  },
+  memoInline: {
+    width: '100%',
+    minHeight: '100%',
+    position: 'relative',
+    justifyContent: 'flex-start',
+    paddingBottom: memoLineBottomOffset + memoLineWidth + 5,
+  },
+  memoUnderline: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: memoLineBottomOffset - memoLineWidth / 2,
+    width: '100%',
+    height: memoLineWidth,
+    borderRadius: 999,
+    backgroundColor: '#B8C6D9',
   },
   nodeNote: {
     color: '#667085',
@@ -1929,6 +2177,33 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontSize: 12,
     fontWeight: '900',
+  },
+  inspectorModeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    padding: 4,
+    borderRadius: 8,
+    backgroundColor: '#EEF3F9',
+  },
+  inspectorModeButton: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+  },
+  inspectorModeButtonActive: {
+    backgroundColor: '#111827',
+  },
+  inspectorModeText: {
+    color: '#334155',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  inspectorModeTextActive: {
+    color: '#FFFFFF',
   },
   nodeInput: {
     minHeight: 86,
