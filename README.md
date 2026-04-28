@@ -1,50 +1,27 @@
-# Welcome to your Expo app 👋
+# Assisted Mindmap
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+ローカルで動く、Codex風コメント付きのマインドマップWebアプリです。
 
-## Get started
+大きなテーマをプロジェクトとして作成し、任意の枝を選びながらアイデア・問い・検証・リスクを追加できます。選択中の枝には、文脈に合わせた「次に広げるための一言」が表示され、そのまま問いノードとして追加できます。
 
-1. Install dependencies
+## Features
 
-   ```bash
-   npm install
-   ```
+- ChatGPT風のプロジェクト一覧
+- プロジェクトごとのローカル保存
+- 任意ノードから子ノード・同階層ノードを追加
+- ノード本文、補足メモ、種類の編集
+- pseudoGT / YOLO研究案やLLM事業案に寄せたローカル思考補助コメント
+- Webブラウザ前提のExpoアプリ
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Getting Started
 
 ```bash
-npm run reset-project
+npm install
+npm run web
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Expoの出力に表示されるURLをブラウザで開いてください。
 
-## Learn more
+## Notes
 
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+現時点では外部AI APIを呼ばず、ブラウザ内のローカルロジックでコメントを生成します。APIキーなしで動くため、研究メモや事業アイデアを手元だけで試せます。
