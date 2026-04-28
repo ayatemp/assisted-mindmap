@@ -36,6 +36,15 @@ const childOffsetX = 286;
 const childOffsetY = 112;
 const minZoom = 0.45;
 const maxZoom = 2.2;
+const fitPadding = 120;
+const webCanvasViewportStyle =
+  Platform.OS === 'web'
+    ? ({
+        overflow: 'scroll',
+        overscrollBehavior: 'contain',
+        scrollbarWidth: 'thin',
+      } as object)
+    : {};
 
 function clampZoom(value: number) {
   return Math.min(maxZoom, Math.max(minZoom, value));
@@ -86,6 +95,7 @@ export default function MindmapHome() {
   const [quickChildText, setQuickChildText] = useState('');
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const canvasScrollerRef = useRef<any>(null);
   const dragRef = useRef<{
     nodeId: string;
     startPageX: number;
@@ -106,21 +116,6 @@ export default function MindmapHome() {
   const selectedPath = selectedProject && selectedNode ? getPath(selectedProject, selectedNode.id) : [];
   const scaledWidth = layout ? layout.width * zoom : 0;
   const scaledHeight = layout ? layout.height * zoom : 0;
-  const wheelZoomProps =
-    Platform.OS === 'web'
-      ? ({
-          onWheel: (event: {
-            ctrlKey?: boolean;
-            metaKey?: boolean;
-            deltaY: number;
-            preventDefault?: () => void;
-          }) => {
-            if (!event.ctrlKey && !event.metaKey) return;
-            event.preventDefault?.();
-            setZoom((current) => clampZoom(current + (event.deltaY > 0 ? -0.08 : 0.08)));
-          },
-        } as const)
-      : {};
 
   function commitProjects(nextProjects: MindProject[]) {
     setProjects(nextProjects);
@@ -348,6 +343,201 @@ export default function MindmapHome() {
     setDraggingNodeId(null);
   }
 
+  function getScrollerMetrics() {
+    if (Platform.OS !== 'web') return null;
+    const node = canvasScrollerRef.current;
+    if (!node) return null;
+    return {
+      scrollLeft: node.scrollLeft ?? 0,
+      scrollTop: node.scrollTop ?? 0,
+      clientWidth: node.clientWidth ?? 0,
+      clientHeight: node.clientHeight ?? 0,
+    };
+  }
+
+  function applyZoom(nextZoom: number, focus?: { x: number; y: number }) {
+    const clamped = clampZoom(nextZoom);
+    const metrics = getScrollerMetrics();
+    const previousZoom = zoom;
+
+    setZoom(clamped);
+
+    if (!metrics || previousZoom === clamped || typeof window === 'undefined') {
+      return;
+    }
+
+    const focusX = focus?.x ?? metrics.clientWidth / 2;
+    const focusY = focus?.y ?? metrics.clientHeight / 2;
+    const contentX = (metrics.scrollLeft + focusX) / previousZoom;
+    const contentY = (metrics.scrollTop + focusY) / previousZoom;
+
+    window.requestAnimationFrame(() => {
+      const node = canvasScrollerRef.current;
+      if (!node) return;
+      node.scrollLeft = contentX * clamped - focusX;
+      node.scrollTop = contentY * clamped - focusY;
+    });
+  }
+
+  function fitToCanvas() {
+    if (!layout) return;
+    const metrics = getScrollerMetrics();
+    if (!metrics) {
+      applyZoom(1);
+      return;
+    }
+
+    const nextZoom = clampZoom(
+      Math.min(
+        (metrics.clientWidth - fitPadding) / layout.width,
+        (metrics.clientHeight - fitPadding) / layout.height
+      )
+    );
+    setZoom(nextZoom);
+
+    if (typeof window === 'undefined') return;
+    window.requestAnimationFrame(() => {
+      const node = canvasScrollerRef.current;
+      if (!node) return;
+      node.scrollLeft = Math.max(0, (layout.width * nextZoom - metrics.clientWidth) / 2);
+      node.scrollTop = Math.max(0, (layout.height * nextZoom - metrics.clientHeight) / 2);
+    });
+  }
+
+  const wheelZoomProps =
+    Platform.OS === 'web'
+      ? ({
+          onWheel: (event: {
+            ctrlKey?: boolean;
+            metaKey?: boolean;
+            deltaY: number;
+            clientX: number;
+            clientY: number;
+            currentTarget?: { getBoundingClientRect?: () => DOMRect };
+            preventDefault?: () => void;
+          }) => {
+            if (!event.ctrlKey && !event.metaKey) return;
+            event.preventDefault?.();
+            const rect = event.currentTarget?.getBoundingClientRect?.();
+            applyZoom(zoom + (event.deltaY > 0 ? -0.08 : 0.08), {
+              x: rect ? event.clientX - rect.left : 0,
+              y: rect ? event.clientY - rect.top : 0,
+            });
+          },
+        } as const)
+      : {};
+
+  function renderCanvasSurface() {
+    if (!layout) return null;
+
+    const canvasChildren = (
+      <View
+        style={[
+          styles.canvas,
+          {
+            width: layout.width,
+            height: layout.height,
+            transformOrigin: 'top left',
+            transform: [{ scale: zoom }],
+          } as object,
+        ]}>
+        {layout.edges.map((edge) => (
+          <Connector key={`${edge.from.id}-${edge.to.id}`} from={edge.from} to={edge.to} />
+        ))}
+        {layout.nodes.map((node) => (
+          <Pressable
+            key={node.id}
+            onPress={() => setSelectedNodeId(node.id)}
+            style={[
+              styles.mindNode,
+              {
+                left: node.x,
+                top: node.y,
+                borderColor: node.id === selectedNode.id ? kindColor(node.kind) : '#D6DDE8',
+              },
+              node.id === selectedNode.id && styles.mindNodeSelected,
+              draggingNodeId === node.id && styles.mindNodeDragging,
+            ]}>
+            <View style={styles.nodeHeader}>
+              <View style={styles.nodeKindGroup}>
+                <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
+                <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
+              </View>
+              <View style={styles.nodeActions}>
+                <View
+                  accessibilityLabel="ノードを移動"
+                  onStartShouldSetResponder={() => true}
+                  onMoveShouldSetResponder={() => true}
+                  onResponderGrant={(event) => beginDrag(event, node.id)}
+                  onResponderMove={updateDrag}
+                  onResponderRelease={endDrag}
+                  onResponderTerminate={endDrag}
+                  style={styles.nodeActionButton}>
+                  <Feather name="move" size={13} color="#334155" />
+                </View>
+                <Pressable
+                  accessibilityLabel="AIで伸ばす"
+                  onPress={(event: GestureResponderEvent) => {
+                    event.stopPropagation();
+                    addAiBranch(node.id);
+                  }}
+                  style={styles.nodeActionButton}>
+                  <Feather name="zap" size={13} color="#2563EB" />
+                  <Text style={styles.nodeActionText}>AI</Text>
+                </Pressable>
+                {node.id !== selectedProject.rootId ? (
+                  <Pressable
+                    accessibilityLabel="ノードを削除"
+                    onPress={(event: GestureResponderEvent) => {
+                      event.stopPropagation();
+                      deleteNode(node.id);
+                    }}
+                    style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
+                    <Feather name="trash-2" size={13} color="#B91C1C" />
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+            <Text style={styles.nodeText} numberOfLines={2}>
+              {node.text}
+            </Text>
+            {node.note ? (
+              <Text style={styles.nodeNote} numberOfLines={1}>
+                {node.note}
+              </Text>
+            ) : null}
+          </Pressable>
+        ))}
+      </View>
+    );
+
+    if (Platform.OS === 'web') {
+      return (
+        <View
+          ref={canvasScrollerRef}
+          style={[styles.canvasViewport, webCanvasViewportStyle]}
+          {...wheelZoomProps}>
+          <View style={{ width: scaledWidth, height: scaledHeight }}>{canvasChildren}</View>
+        </View>
+      );
+    }
+
+    return (
+      <ScrollView
+        style={styles.canvasViewport}
+        contentContainerStyle={{ width: scaledWidth, height: scaledHeight }}
+        horizontal
+        scrollEnabled={!draggingNodeId}
+        nestedScrollEnabled>
+        <ScrollView
+          contentContainerStyle={{ width: scaledWidth, height: scaledHeight }}
+          scrollEnabled={!draggingNodeId}>
+          {canvasChildren}
+        </ScrollView>
+      </ScrollView>
+    );
+  }
+
   if (!selectedProject || !layout || !selectedNode) {
     return (
       <View style={styles.emptyState}>
@@ -435,116 +625,35 @@ export default function MindmapHome() {
         </View>
 
         <View style={[styles.body, compact && styles.bodyCompact]}>
-          <View style={styles.canvasArea} {...wheelZoomProps}>
+          <View style={styles.canvasArea}>
             <View style={styles.zoomControls}>
               <Pressable
+                accessibilityLabel="全体表示"
+                onPress={fitToCanvas}
+                style={styles.zoomFitButton}>
+                <Feather name="maximize-2" size={14} color="#0F172A" />
+                <Text style={styles.zoomFitText}>Fit</Text>
+              </Pressable>
+              <Pressable
                 accessibilityLabel="ズームアウト"
-                onPress={() => setZoom((current) => clampZoom(current - 0.1))}
+                onPress={() => applyZoom(zoom - 0.1)}
                 style={styles.zoomButton}>
                 <Feather name="minus" size={16} color="#111827" />
               </Pressable>
               <Pressable
                 accessibilityLabel="ズームをリセット"
-                onPress={() => setZoom(1)}
+                onPress={() => applyZoom(1)}
                 style={styles.zoomValueButton}>
                 <Text style={styles.zoomValueText}>{Math.round(zoom * 100)}%</Text>
               </Pressable>
               <Pressable
                 accessibilityLabel="ズームイン"
-                onPress={() => setZoom((current) => clampZoom(current + 0.1))}
+                onPress={() => applyZoom(zoom + 0.1)}
                 style={styles.zoomButton}>
                 <Feather name="plus" size={16} color="#111827" />
               </Pressable>
             </View>
-            <ScrollView
-              style={styles.canvasViewport}
-              contentContainerStyle={{ width: scaledWidth, height: scaledHeight }}
-              horizontal
-              scrollEnabled={!draggingNodeId}
-              nestedScrollEnabled>
-              <ScrollView
-                contentContainerStyle={{ width: scaledWidth, height: scaledHeight }}
-                scrollEnabled={!draggingNodeId}>
-                <View
-                  style={[
-                    styles.canvas,
-                    {
-                      width: layout.width,
-                      height: layout.height,
-                      transformOrigin: 'top left',
-                      transform: [{ scale: zoom }],
-                    } as object,
-                  ]}>
-                  {layout.edges.map((edge) => (
-                    <Connector key={`${edge.from.id}-${edge.to.id}`} from={edge.from} to={edge.to} />
-                  ))}
-                  {layout.nodes.map((node) => (
-                    <Pressable
-                      key={node.id}
-                      onPress={() => setSelectedNodeId(node.id)}
-                      style={[
-                        styles.mindNode,
-                        {
-                          left: node.x,
-                          top: node.y,
-                          borderColor: node.id === selectedNode.id ? kindColor(node.kind) : '#D6DDE8',
-                        },
-                        node.id === selectedNode.id && styles.mindNodeSelected,
-                        draggingNodeId === node.id && styles.mindNodeDragging,
-                      ]}>
-                      <View style={styles.nodeHeader}>
-                        <View style={styles.nodeKindGroup}>
-                          <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
-                          <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
-                        </View>
-                        <View style={styles.nodeActions}>
-                          <View
-                            accessibilityLabel="ノードを移動"
-                            onStartShouldSetResponder={() => true}
-                            onMoveShouldSetResponder={() => true}
-                            onResponderGrant={(event) => beginDrag(event, node.id)}
-                            onResponderMove={updateDrag}
-                            onResponderRelease={endDrag}
-                            onResponderTerminate={endDrag}
-                            style={styles.nodeActionButton}>
-                            <Feather name="move" size={13} color="#334155" />
-                          </View>
-                          <Pressable
-                            accessibilityLabel="AIで伸ばす"
-                            onPress={(event: GestureResponderEvent) => {
-                              event.stopPropagation();
-                              addAiBranch(node.id);
-                            }}
-                            style={styles.nodeActionButton}>
-                            <Feather name="zap" size={13} color="#2563EB" />
-                            <Text style={styles.nodeActionText}>AI</Text>
-                          </Pressable>
-                          {node.id !== selectedProject.rootId ? (
-                            <Pressable
-                              accessibilityLabel="ノードを削除"
-                              onPress={(event: GestureResponderEvent) => {
-                                event.stopPropagation();
-                                deleteNode(node.id);
-                              }}
-                              style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
-                              <Feather name="trash-2" size={13} color="#B91C1C" />
-                            </Pressable>
-                          ) : null}
-                        </View>
-                      </View>
-                      <Text style={styles.nodeText} numberOfLines={2}>
-                        {node.text}
-                      </Text>
-                      {node.note ? (
-                        <Text style={styles.nodeNote} numberOfLines={1}>
-                          {node.note}
-                        </Text>
-                      ) : null}
-                    </Pressable>
-                  ))}
-                </View>
-              </ScrollView>
-            </ScrollView>
+            {renderCanvasSurface()}
           </View>
 
           <View style={[styles.inspector, compact && styles.inspectorCompact]}>
@@ -827,21 +936,41 @@ const styles = StyleSheet.create({
   },
   zoomControls: {
     position: 'absolute',
-    top: 14,
-    right: 14,
+    top: 16,
+    right: 16,
     zIndex: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#D6DDE8',
     backgroundColor: '#FFFFFF',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
   },
   zoomButton: {
     width: 36,
     height: 36,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  zoomFitButton: {
+    minWidth: 62,
+    height: 36,
+    paddingHorizontal: 10,
+    borderRightWidth: 1,
+    borderColor: '#E5EAF1',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  zoomFitText: {
+    color: '#0F172A',
+    fontSize: 12,
+    fontWeight: '800',
   },
   zoomValueButton: {
     minWidth: 58,
