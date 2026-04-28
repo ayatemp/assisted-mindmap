@@ -38,6 +38,8 @@ const childOffsetY = 112;
 const minZoom = 0.45;
 const maxZoom = 2.2;
 const fitPadding = 120;
+const canvasPaddingX = 960;
+const canvasPaddingY = 760;
 const webCanvasViewportStyle =
   Platform.OS === 'web'
     ? ({
@@ -128,6 +130,7 @@ export default function MindmapHome() {
   const [sidebarWidth, setSidebarWidth] = useState(initialPanels.sidebar);
   const [inspectorWidth, setInspectorWidth] = useState(initialPanels.inspector);
   const canvasScrollerRef = useRef<any>(null);
+  const zoomRef = useRef(1);
   const dragRef = useRef<{
     nodeId: string;
     startPageX: number;
@@ -151,6 +154,10 @@ export default function MindmapHome() {
       JSON.stringify({ sidebar: sidebarWidth, inspector: inspectorWidth })
     );
   }, [inspectorWidth, sidebarWidth]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
@@ -195,8 +202,10 @@ export default function MindmapHome() {
     [selectedProject]
   );
   const selectedPath = selectedProject && selectedNode ? getPath(selectedProject, selectedNode.id) : [];
-  const scaledWidth = layout ? layout.width * zoom : 0;
-  const scaledHeight = layout ? layout.height * zoom : 0;
+  const contentWidth = layout ? layout.width + canvasPaddingX * 2 : 0;
+  const contentHeight = layout ? layout.height + canvasPaddingY * 2 : 0;
+  const scaledWidth = contentWidth * zoom;
+  const scaledHeight = contentHeight * zoom;
 
   function commitProjects(nextProjects: MindProject[]) {
     setProjects(nextProjects);
@@ -388,8 +397,8 @@ export default function MindmapHome() {
           [nodeId]: touchNode({
             ...node,
             position: {
-              x: Math.max(0, Math.round(x)),
-              y: Math.max(0, Math.round(y)),
+              x: Math.max(-canvasPaddingX + 120, Math.round(x)),
+              y: Math.max(-canvasPaddingY + 120, Math.round(y)),
             },
           }),
         },
@@ -482,8 +491,8 @@ export default function MindmapHome() {
 
     const nextZoom = clampZoom(
       Math.min(
-        (metrics.clientWidth - fitPadding) / layout.width,
-        (metrics.clientHeight - fitPadding) / layout.height
+        (metrics.clientWidth - fitPadding) / contentWidth,
+        (metrics.clientHeight - fitPadding) / contentHeight
       )
     );
     setZoom(nextZoom);
@@ -492,10 +501,21 @@ export default function MindmapHome() {
     window.requestAnimationFrame(() => {
       const node = canvasScrollerRef.current;
       if (!node) return;
-      node.scrollLeft = Math.max(0, (layout.width * nextZoom - metrics.clientWidth) / 2);
-      node.scrollTop = Math.max(0, (layout.height * nextZoom - metrics.clientHeight) / 2);
+      node.scrollLeft = Math.max(0, (contentWidth * nextZoom - metrics.clientWidth) / 2);
+      node.scrollTop = Math.max(0, (contentHeight * nextZoom - metrics.clientHeight) / 2);
     });
   }
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !layout) return;
+
+    window.requestAnimationFrame(() => {
+      const node = canvasScrollerRef.current;
+      if (!node) return;
+      node.scrollLeft = Math.max(0, canvasPaddingX * zoomRef.current * 0.55);
+      node.scrollTop = Math.max(0, canvasPaddingY * zoomRef.current * 0.58);
+    });
+  }, [activeProjectId, layout]);
 
   const wheelZoomProps =
     Platform.OS === 'web'
@@ -526,79 +546,90 @@ export default function MindmapHome() {
     const canvasChildren = (
       <View
         style={[
-          styles.canvas,
+          styles.canvasWorld,
           {
-            width: layout.width,
-            height: layout.height,
+            width: contentWidth,
+            height: contentHeight,
             transformOrigin: 'top left',
             transform: [{ scale: zoom }],
           } as object,
         ]}>
-        <ConnectorLayer width={layout.width} height={layout.height} edges={layout.edges} />
-        {layout.nodes.map((node) => (
-          <Pressable
-            key={node.id}
-            onPress={() => setSelectedNodeId(node.id)}
-            style={[
-              styles.mindNode,
-              {
-                left: node.x,
-                top: node.y,
-                borderColor: node.id === selectedNode.id ? kindColor(node.kind) : '#D6DDE8',
-              },
-              node.id === selectedNode.id && styles.mindNodeSelected,
-              draggingNodeId === node.id && styles.mindNodeDragging,
-            ]}>
-            <View style={styles.nodeHeader}>
-              <View style={styles.nodeKindGroup}>
-                <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
-                <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
-              </View>
-              <View style={styles.nodeActions}>
-                <View
-                  accessibilityLabel="ノードを移動"
-                  onStartShouldSetResponder={() => true}
-                  onMoveShouldSetResponder={() => true}
-                  onResponderGrant={(event) => beginDrag(event, node.id)}
-                  onResponderMove={updateDrag}
-                  onResponderRelease={endDrag}
-                  onResponderTerminate={endDrag}
-                  style={styles.nodeActionButton}>
-                  <Feather name="move" size={13} color="#334155" />
+        <View
+          style={[
+            styles.canvas,
+            {
+              left: canvasPaddingX,
+              top: canvasPaddingY,
+              width: layout.width,
+              height: layout.height,
+            },
+          ]}>
+          <ConnectorLayer width={layout.width} height={layout.height} edges={layout.edges} />
+          {layout.nodes.map((node) => (
+            <Pressable
+              key={node.id}
+              onPress={() => setSelectedNodeId(node.id)}
+              style={[
+                styles.mindNode,
+                {
+                  left: node.x,
+                  top: node.y,
+                  borderColor: node.id === selectedNode.id ? kindColor(node.kind) : '#D6DDE8',
+                },
+                node.id === selectedNode.id && styles.mindNodeSelected,
+                draggingNodeId === node.id && styles.mindNodeDragging,
+              ]}>
+              <View style={styles.nodeHeader}>
+                <View style={styles.nodeKindGroup}>
+                  <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
+                  <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
                 </View>
-                <Pressable
-                  accessibilityLabel="AIで伸ばす"
-                  onPress={(event: GestureResponderEvent) => {
-                    event.stopPropagation();
-                    addAiBranch(node.id);
-                  }}
-                  style={styles.nodeActionButton}>
-                  <Feather name="zap" size={13} color="#2563EB" />
-                  <Text style={styles.nodeActionText}>AI</Text>
-                </Pressable>
-                {node.id !== selectedProject.rootId ? (
+                <View style={styles.nodeActions}>
+                  <View
+                    accessibilityLabel="ノードを移動"
+                    onStartShouldSetResponder={() => true}
+                    onMoveShouldSetResponder={() => true}
+                    onResponderGrant={(event) => beginDrag(event, node.id)}
+                    onResponderMove={updateDrag}
+                    onResponderRelease={endDrag}
+                    onResponderTerminate={endDrag}
+                    style={styles.nodeActionButton}>
+                    <Feather name="move" size={13} color="#334155" />
+                  </View>
                   <Pressable
-                    accessibilityLabel="ノードを削除"
+                    accessibilityLabel="AIで伸ばす"
                     onPress={(event: GestureResponderEvent) => {
                       event.stopPropagation();
-                      deleteNode(node.id);
+                      addAiBranch(node.id);
                     }}
-                    style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
-                    <Feather name="trash-2" size={13} color="#B91C1C" />
+                    style={styles.nodeActionButton}>
+                    <Feather name="zap" size={13} color="#2563EB" />
+                    <Text style={styles.nodeActionText}>AI</Text>
                   </Pressable>
-                ) : null}
+                  {node.id !== selectedProject.rootId ? (
+                    <Pressable
+                      accessibilityLabel="ノードを削除"
+                      onPress={(event: GestureResponderEvent) => {
+                        event.stopPropagation();
+                        deleteNode(node.id);
+                      }}
+                      style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
+                      <Feather name="trash-2" size={13} color="#B91C1C" />
+                    </Pressable>
+                  ) : null}
+                </View>
               </View>
-            </View>
-            <Text style={styles.nodeText} numberOfLines={2}>
-              {node.text}
-            </Text>
-            {node.note ? (
-              <Text style={styles.nodeNote} numberOfLines={1}>
-                {node.note}
+              <Text style={styles.nodeText} numberOfLines={2}>
+                {node.text}
               </Text>
-            ) : null}
-          </Pressable>
-        ))}
+              {node.note ? (
+                <Text style={styles.nodeNote} numberOfLines={1}>
+                  {node.note}
+                </Text>
+              ) : null}
+            </Pressable>
+          ))}
+        </View>
       </View>
     );
 
@@ -1127,6 +1158,10 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   canvas: {
+    position: 'relative',
+    backgroundColor: '#EEF3F9',
+  },
+  canvasWorld: {
     position: 'relative',
     backgroundColor: '#EEF3F9',
   },
