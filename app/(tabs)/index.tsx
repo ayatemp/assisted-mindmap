@@ -523,16 +523,27 @@ export default function MindmapHome() {
           onWheel: (event: {
             ctrlKey?: boolean;
             metaKey?: boolean;
+            deltaX?: number;
             deltaY: number;
             clientX: number;
             clientY: number;
             currentTarget?: { getBoundingClientRect?: () => DOMRect };
             preventDefault?: () => void;
           }) => {
-            if (!event.ctrlKey && !event.metaKey) return;
+            const node = canvasScrollerRef.current;
+            if (!node) return;
+
+            if (!event.ctrlKey && !event.metaKey) {
+              event.preventDefault?.();
+              node.scrollLeft += event.deltaX ?? 0;
+              node.scrollTop += event.deltaY;
+              return;
+            }
+
             event.preventDefault?.();
             const rect = event.currentTarget?.getBoundingClientRect?.();
-            applyZoom(zoom + (event.deltaY > 0 ? -0.08 : 0.08), {
+            const nextZoom = clampZoom(zoom * Math.exp(-event.deltaY * 0.00085));
+            applyZoom(nextZoom, {
               x: rect ? event.clientX - rect.left : 0,
               y: rect ? event.clientY - rect.top : 0,
             });
@@ -760,7 +771,7 @@ export default function MindmapHome() {
               </Pressable>
               <Pressable
                 accessibilityLabel="ズームアウト"
-                onPress={() => applyZoom(zoom - 0.1)}
+                onPress={() => applyZoom(zoom - 0.06)}
                 style={styles.zoomButton}>
                 <Feather name="minus" size={16} color="#111827" />
               </Pressable>
@@ -772,7 +783,7 @@ export default function MindmapHome() {
               </Pressable>
               <Pressable
                 accessibilityLabel="ズームイン"
-                onPress={() => applyZoom(zoom + 0.1)}
+                onPress={() => applyZoom(zoom + 0.06)}
                 style={styles.zoomButton}>
                 <Feather name="plus" size={16} color="#111827" />
               </Pressable>
