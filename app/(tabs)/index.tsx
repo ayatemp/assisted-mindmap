@@ -1,5 +1,5 @@
 import { Feather } from '@expo/vector-icons';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Svg, { Path } from 'react-native-svg';
 import {
   Platform,
@@ -46,6 +46,34 @@ const webCanvasViewportStyle =
         scrollbarWidth: 'thin',
       } as object)
     : {};
+const webResizeHandleStyle =
+  Platform.OS === 'web'
+    ? ({
+        cursor: 'col-resize',
+      } as object)
+    : {};
+const PANEL_STORAGE_KEY = 'assisted-mindmap-panels-v1';
+const sidebarMinWidth = 232;
+const sidebarMaxWidth = 420;
+const inspectorMinWidth = 300;
+const inspectorMaxWidth = 520;
+
+function loadPanelSizes() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') {
+    return { sidebar: 292, inspector: 360 };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(PANEL_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return {
+      sidebar: typeof parsed?.sidebar === 'number' ? parsed.sidebar : 292,
+      inspector: typeof parsed?.inspector === 'number' ? parsed.inspector : 360,
+    };
+  } catch {
+    return { sidebar: 292, inspector: 360 };
+  }
+}
 
 function clampZoom(value: number) {
   return Math.min(maxZoom, Math.max(minZoom, value));
@@ -88,6 +116,7 @@ function kindColor(kind: NodeKind) {
 }
 
 export default function MindmapHome() {
+  const initialPanels = loadPanelSizes();
   const [projects, setProjects] = useState<MindProject[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState(projects[0]?.id ?? '');
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
@@ -96,6 +125,8 @@ export default function MindmapHome() {
   const [quickChildText, setQuickChildText] = useState('');
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [sidebarWidth, setSidebarWidth] = useState(initialPanels.sidebar);
+  const [inspectorWidth, setInspectorWidth] = useState(initialPanels.inspector);
   const canvasScrollerRef = useRef<any>(null);
   const dragRef = useRef<{
     nodeId: string;
@@ -105,8 +136,57 @@ export default function MindmapHome() {
     startY: number;
     moved: boolean;
   } | null>(null);
+  const resizeRef = useRef<{
+    panel: 'sidebar' | 'inspector';
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const { width } = useWindowDimensions();
   const compact = width < 920;
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      PANEL_STORAGE_KEY,
+      JSON.stringify({ sidebar: sidebarWidth, inspector: inspectorWidth })
+    );
+  }, [inspectorWidth, sidebarWidth]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+
+    function handleMouseMove(event: MouseEvent) {
+      const current = resizeRef.current;
+      if (!current) return;
+
+      if (current.panel === 'sidebar') {
+        const nextWidth = Math.min(
+          Math.max(current.startWidth + (event.clientX - current.startX), sidebarMinWidth),
+          Math.min(sidebarMaxWidth, width * 0.42)
+        );
+        setSidebarWidth(Math.round(nextWidth));
+        return;
+      }
+
+      const nextWidth = Math.min(
+        Math.max(current.startWidth - (event.clientX - current.startX), inspectorMinWidth),
+        Math.min(inspectorMaxWidth, width * 0.46)
+      );
+      setInspectorWidth(Math.round(nextWidth));
+    }
+
+    function handleMouseUp() {
+      resizeRef.current = null;
+    }
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [width]);
 
   const selectedProject = activeProject;
   const selectedNode = selectedProject?.nodes[selectedNodeId] ?? selectedProject?.nodes[selectedProject.rootId];
@@ -346,6 +426,16 @@ export default function MindmapHome() {
     setDraggingNodeId(null);
   }
 
+  function startResize(panel: 'sidebar' | 'inspector', event: GestureResponderEvent) {
+    if (Platform.OS !== 'web') return;
+    event.stopPropagation();
+    resizeRef.current = {
+      panel,
+      startX: event.nativeEvent.pageX,
+      startWidth: panel === 'sidebar' ? sidebarWidth : inspectorWidth,
+    };
+  }
+
   function getScrollerMetrics() {
     if (Platform.OS !== 'web') return null;
     const node = canvasScrollerRef.current;
@@ -558,7 +648,7 @@ export default function MindmapHome() {
 
   return (
     <View style={[styles.app, compact && styles.appCompact]}>
-      <View style={[styles.sidebar, compact && styles.sidebarCompact]}>
+      <View style={[styles.sidebar, !compact && { width: sidebarWidth }, compact && styles.sidebarCompact]}>
         <View style={styles.brandRow}>
           <View style={styles.brandMark}>
             <Feather name="git-branch" size={18} color="#F8FAFC" />
@@ -602,6 +692,8 @@ export default function MindmapHome() {
           })}
         </ScrollView>
       </View>
+
+      {!compact ? <ResizeHandle onStart={(event) => startResize('sidebar', event)} /> : null}
 
       <View style={styles.workspace}>
         <View style={styles.topbar}>
@@ -657,7 +749,14 @@ export default function MindmapHome() {
             {renderCanvasSurface()}
           </View>
 
-          <View style={[styles.inspector, compact && styles.inspectorCompact]}>
+          {!compact ? <ResizeHandle onStart={(event) => startResize('inspector', event)} /> : null}
+
+          <View
+            style={[
+              styles.inspector,
+              !compact && { width: inspectorWidth },
+              compact && styles.inspectorCompact,
+            ]}>
             <ScrollView contentContainerStyle={styles.inspectorContent}>
               <View style={styles.pathBar}>
                 {selectedPath.map((node, index) => (
@@ -725,6 +824,18 @@ export default function MindmapHome() {
           </View>
         </View>
       </View>
+    </View>
+  );
+}
+
+function ResizeHandle({ onStart }: { onStart: (event: GestureResponderEvent) => void }) {
+  return (
+    <View
+      accessibilityLabel="パネル幅を調整"
+      onStartShouldSetResponder={() => true}
+      onResponderGrant={onStart}
+      style={[styles.resizeHandle, webResizeHandleStyle]}>
+      <View style={styles.resizeHandleLine} />
     </View>
   );
 }
@@ -810,6 +921,18 @@ const styles = StyleSheet.create({
   sidebarCompact: {
     width: '100%',
     maxHeight: 210,
+  },
+  resizeHandle: {
+    width: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EEF3F9',
+  },
+  resizeHandleLine: {
+    width: 4,
+    height: 72,
+    borderRadius: 999,
+    backgroundColor: '#D7E0EC',
   },
   brandRow: {
     flexDirection: 'row',
