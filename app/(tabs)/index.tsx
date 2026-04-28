@@ -9,6 +9,7 @@ import {
   TextInput,
   View,
   useWindowDimensions,
+  type GestureResponderEvent,
 } from 'react-native';
 
 import {
@@ -129,22 +130,34 @@ export default function MindmapHome() {
     );
   }
 
-  function addChild(text?: string, kind: NodeKind = 'idea') {
-    if (!selectedNode) return;
+  function addChildToNode(parentId: string, text?: string, kind: NodeKind = 'idea') {
+    const parentNode = selectedProject?.nodes[parentId];
+    if (!parentNode) return;
     const child = createNode(text || quickChildText || '新しい枝', kind);
     updateProject((project) => {
-      const parent = project.nodes[selectedNode.id];
+      const parent = project.nodes[parentId];
       return bumpProject({
         ...project,
         nodes: {
           ...project.nodes,
-          [selectedNode.id]: touchNode({ ...parent, children: [...parent.children, child.id] }),
+          [parentId]: touchNode({ ...parent, children: [...parent.children, child.id] }),
           [child.id]: child,
         },
       });
     });
     setQuickChildText('');
     setSelectedNodeId(child.id);
+  }
+
+  function addChild(text?: string, kind: NodeKind = 'idea') {
+    if (!selectedNode) return;
+    addChildToNode(selectedNode.id, text, kind);
+  }
+
+  function addAiBranch(nodeId: string) {
+    if (!selectedProject) return;
+    const hint = createAssistantHint(selectedProject, nodeId).replace(/^いま選んでいる「.*?」について、/, '');
+    addChildToNode(nodeId, hint, 'question');
   }
 
   function addSibling() {
@@ -169,11 +182,11 @@ export default function MindmapHome() {
     setSelectedNodeId(sibling.id);
   }
 
-  function deleteSelectedNode() {
-    if (!selectedProject || !selectedNode || selectedNode.id === selectedProject.rootId) return;
-    const parentId = findParentId(selectedProject, selectedNode.id);
+  function deleteNode(nodeId: string) {
+    if (!selectedProject || nodeId === selectedProject.rootId) return;
+    const parentId = findParentId(selectedProject, nodeId);
     if (!parentId) return;
-    const removeIds = new Set(getDescendantIds(selectedProject, selectedNode.id));
+    const removeIds = new Set(getDescendantIds(selectedProject, nodeId));
     updateProject((project) => {
       const nodes = { ...project.nodes };
       removeIds.forEach((id) => delete nodes[id]);
@@ -189,7 +202,14 @@ export default function MindmapHome() {
         },
       });
     });
-    setSelectedNodeId(parentId);
+    if (removeIds.has(selectedNode?.id ?? '')) {
+      setSelectedNodeId(parentId);
+    }
+  }
+
+  function deleteSelectedNode() {
+    if (!selectedNode) return;
+    deleteNode(selectedNode.id);
   }
 
   function cycleHint() {
@@ -321,8 +341,33 @@ export default function MindmapHome() {
                       node.id === selectedNode.id && styles.mindNodeSelected,
                     ]}>
                     <View style={styles.nodeHeader}>
-                      <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
-                      <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
+                      <View style={styles.nodeKindGroup}>
+                        <View style={[styles.kindDot, { backgroundColor: kindColor(node.kind) }]} />
+                        <Text style={styles.nodeKind}>{kindLabel(node.kind)}</Text>
+                      </View>
+                      <View style={styles.nodeActions}>
+                        <Pressable
+                          accessibilityLabel="AIで伸ばす"
+                          onPress={(event: GestureResponderEvent) => {
+                            event.stopPropagation();
+                            addAiBranch(node.id);
+                          }}
+                          style={styles.nodeActionButton}>
+                          <Feather name="zap" size={13} color="#2563EB" />
+                          <Text style={styles.nodeActionText}>AI</Text>
+                        </Pressable>
+                        {node.id !== selectedProject.rootId ? (
+                          <Pressable
+                            accessibilityLabel="ノードを削除"
+                            onPress={(event: GestureResponderEvent) => {
+                              event.stopPropagation();
+                              deleteNode(node.id);
+                            }}
+                            style={[styles.nodeActionButton, styles.nodeActionButtonDanger]}>
+                            <Feather name="trash-2" size={13} color="#B91C1C" />
+                          </Pressable>
+                        ) : null}
+                      </View>
                     </View>
                     <Text style={styles.nodeText} numberOfLines={2}>
                       {node.text}
@@ -416,9 +461,9 @@ export default function MindmapHome() {
                 <Text style={styles.assistantText}>{assistantHint}</Text>
                 <Pressable
                   style={styles.assistantButton}
-                  onPress={() => addChild(assistantHint.replace(/^いま選んでいる「.*?」について、/, ''), 'question')}>
+                  onPress={() => addAiBranch(selectedNode.id)}>
                   <Feather name="message-square" size={16} color="#0F172A" />
-                  <Text style={styles.assistantButtonText}>この問いを枝にする</Text>
+                  <Text style={styles.assistantButtonText}>AIで伸ばす</Text>
                 </Pressable>
               </View>
             </ScrollView>
@@ -649,8 +694,39 @@ const styles = StyleSheet.create({
   nodeHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 6,
     marginBottom: 7,
+  },
+  nodeKindGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  nodeActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  nodeActionButton: {
+    minWidth: 34,
+    height: 24,
+    borderRadius: 7,
+    backgroundColor: '#EEF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 3,
+    paddingHorizontal: 5,
+  },
+  nodeActionButtonDanger: {
+    minWidth: 24,
+    backgroundColor: '#FFF1F2',
+  },
+  nodeActionText: {
+    color: '#2563EB',
+    fontSize: 10,
+    fontWeight: '900',
   },
   kindDot: {
     width: 8,
