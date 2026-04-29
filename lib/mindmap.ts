@@ -71,11 +71,11 @@ export function getNodeSize(node: Pick<MindNode, 'display'> & Partial<Pick<MindN
     const explicitLines = normalized.split('\n');
     const estimatedLines = explicitLines.reduce((count, line) => {
       const length = Math.max(1, Array.from(line).length);
-      return count + Math.ceil(length / 34);
+      return count + Math.ceil(length / 30);
     }, 0);
     return {
       width: nodeSizes.memo.width,
-      height: Math.max(nodeSizes.memo.height, estimatedLines * 18 + 24),
+      height: Math.max(nodeSizes.memo.height, estimatedLines * 18 + 18),
     };
   }
   return nodeSizes[node.display] ?? nodeSizes.node;
@@ -246,46 +246,88 @@ export function normalizeTags(tags?: NodeTag[]) {
 
 export function layoutMindmap(project: MindProject): MindmapLayout {
   const positioned = new Map<string, PositionedNode>();
-  const depthGap = 286;
-  const rowGap = 124;
+  const depthGap = 58;
+  const rowGap = 52;
   const startX = 32;
   const startY = 42;
-  let row = 0;
+  const subtreeHeights = new Map<string, number>();
+  const depths = new Map<string, number>();
+  const maxWidthByDepth = new Map<number, number>();
 
-  function place(id: string, depth: number): number {
+  function collect(id: string, depth: number) {
     const node = project.nodes[id];
-    if (!node) return row * rowGap;
-    const childIds = node.children.filter((childId) => Boolean(project.nodes[childId]));
-
-    if (childIds.length === 0) {
-      const y = startY + row * rowGap;
-      row += 1;
-      positioned.set(id, {
-        ...node,
-        x: node.position?.x ?? startX + depth * depthGap,
-        y: node.position?.y ?? y,
-        depth,
-      });
-      return y;
-    }
-
-    const childYs = childIds.map((childId) => place(childId, depth + 1));
-    const y = childYs.reduce((sum, value) => sum + value, 0) / childYs.length;
-    positioned.set(id, {
-      ...node,
-      x: node.position?.x ?? startX + depth * depthGap,
-      y: node.position?.y ?? y,
-      depth,
-    });
-    return y;
+    if (!node || depths.has(id)) return;
+    depths.set(id, depth);
+    maxWidthByDepth.set(depth, Math.max(maxWidthByDepth.get(depth) ?? 0, getNodeSize(node).width));
+    node.children.forEach((childId) => collect(childId, depth + 1));
   }
 
-  place(project.rootId, 0);
+  collect(project.rootId, 0);
 
-  const nodes = Array.from(positioned.values()).sort((a, b) => a.depth - b.depth || a.y - b.y);
+  const maxDepth = Math.max(0, ...Array.from(depths.values()));
+  const xByDepth = new Map<number, number>();
+  let cursorX = startX;
+  for (let depth = 0; depth <= maxDepth; depth += 1) {
+    xByDepth.set(depth, cursorX);
+    cursorX += (maxWidthByDepth.get(depth) ?? nodeSizes.node.width) + depthGap;
+  }
+
+  function measureSubtree(id: string): number {
+    const cached = subtreeHeights.get(id);
+    if (cached !== undefined) return cached;
+
+    const node = project.nodes[id];
+    if (!node) return 0;
+    const childIds = node.children.filter((childId) => Boolean(project.nodes[childId]));
+    const ownHeight = getNodeSize(node).height;
+    const childHeight =
+      childIds.length === 0
+        ? 0
+        : childIds.reduce((sum, childId) => sum + measureSubtree(childId), 0) + rowGap * (childIds.length - 1);
+    const height = Math.max(ownHeight, childHeight);
+    subtreeHeights.set(id, height);
+    return height;
+  }
+
+  function place(id: string, depth: number, top: number): number {
+    const node = project.nodes[id];
+    if (!node) return top;
+    const childIds = node.children.filter((childId) => Boolean(project.nodes[childId]));
+    const ownSize = getNodeSize(node);
+    const subtreeHeight = measureSubtree(id);
+
+    if (childIds.length === 0) {
+      positioned.set(id, {
+        ...node,
+        x: node.position?.x ?? xByDepth.get(depth) ?? startX,
+        y: node.position?.y ?? top,
+        depth,
+      });
+      return top + subtreeHeight;
+    }
+
+    const childBlockHeight =
+      childIds.reduce((sum, childId) => sum + measureSubtree(childId), 0) + rowGap * (childIds.length - 1);
+    let childTop = top + Math.max(0, (subtreeHeight - childBlockHeight) / 2);
+    childIds.forEach((childId) => {
+      childTop = place(childId, depth + 1, childTop) + rowGap;
+    });
+
+    positioned.set(id, {
+      ...node,
+      x: node.position?.x ?? xByDepth.get(depth) ?? startX,
+      y: node.position?.y ?? top + subtreeHeight / 2 - ownSize.height / 2,
+      depth,
+    });
+    return top + subtreeHeight;
+  }
+
+  place(project.rootId, 0, startY);
+
+  const nodes = resolveNodeCollisions(Array.from(positioned.values())).sort((a, b) => a.depth - b.depth || a.y - b.y);
   const edges = nodes.flatMap((node) =>
     node.children
-      .map((childId) => positioned.get(childId))
+      .map((childId) => nodes.find((positionedNode) => positionedNode.id === childId))
       .filter((child): child is PositionedNode => Boolean(child))
       .map((child) => ({ from: node, to: child }))
   );
@@ -294,6 +336,47 @@ export function layoutMindmap(project: MindProject): MindmapLayout {
   const height = Math.max(620, ...nodes.map((node) => node.y + getNodeSize(node).height + 32));
 
   return { nodes, edges, width, height };
+}
+
+function rectsOverlap(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+  gap = 16
+) {
+  return !(
+    a.x + a.width + gap < b.x ||
+    b.x + b.width + gap < a.x ||
+    a.y + a.height + gap < b.y ||
+    b.y + b.height + gap < a.y
+  );
+}
+
+function resolveNodeCollisions(nodes: PositionedNode[]) {
+  const resolved = nodes.map((node) => ({ ...node }));
+  const maxPasses = Math.max(4, resolved.length * 2);
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let moved = false;
+    const ordered = [...resolved].sort((a, b) => a.y - b.y || a.x - b.x);
+
+    for (const node of ordered) {
+      const nodeSize = getNodeSize(node);
+      for (const other of ordered) {
+        if (node.id === other.id) continue;
+        if (other.y > node.y || (other.y === node.y && other.x >= node.x)) continue;
+        const otherSize = getNodeSize(other);
+        const nodeRect = { x: node.x, y: node.y, width: nodeSize.width, height: nodeSize.height };
+        const otherRect = { x: other.x, y: other.y, width: otherSize.width, height: otherSize.height };
+        if (!rectsOverlap(nodeRect, otherRect)) continue;
+        node.y = Math.ceil(other.y + otherSize.height + 16);
+        moved = true;
+      }
+    }
+
+    if (!moved) break;
+  }
+
+  return resolved;
 }
 
 const pseudoHints = [
