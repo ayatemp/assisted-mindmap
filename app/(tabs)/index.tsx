@@ -576,8 +576,9 @@ function buildCodexChatPrompt(project: MindProject, nodeId: string, userText: st
     '',
     'Task:',
     'ユーザーの迷いを受けて、次にどのノードを広げるべきかを日本語で相談相手として返答する。',
-    '返答は短めにし、具体的な追加候補を3個出す。',
-    'suggestions は、そのままマインドマップに追加できるノードまたはメモにする。',
+    '会話として自然に返す。入力が「ああ」「うーん」「どうしよう」だけのように曖昧な場合は、無理に候補を出さず、何に迷っているかを聞き返す。',
+    '十分に文脈がある場合だけ、具体的な追加候補を1〜3個出す。',
+    'suggestions は、そのままマインドマップに追加できるノードまたはメモにする。聞き返しだけでよい場合は空配列にする。',
   ]
     .filter(Boolean)
     .join('\n');
@@ -648,7 +649,7 @@ async function generateCodexChatReply(
             {
               type: 'input_text',
               text:
-                'You are Codex inside a local mindmap app. Help the user think, then propose concrete next nodes. Return only valid JSON matching the schema. Write in Japanese.',
+                'You are Codex inside a local mindmap app. Have a real conversation with the user. If the user input is vague, short, or only a backchannel, ask a clarifying question and return no suggestions. If there is enough intent, help the user think and propose concrete next nodes. Return only valid JSON matching the schema. Write in Japanese.',
             },
           ],
         },
@@ -670,7 +671,7 @@ async function generateCodexChatReply(
               text: { type: 'string' },
               suggestions: {
                 type: 'array',
-                minItems: 1,
+                minItems: 0,
                 maxItems: 3,
                 items: {
                   type: 'object',
@@ -700,108 +701,239 @@ async function generateCodexChatReply(
   return reply;
 }
 
-function createLocalCodexReply(project: MindProject, nodeId: string, userText: string) {
+function isVagueCodexInput(text: string) {
+  const normalized = text
+    .replace(/[!！?？。、．・\s]/g, '')
+    .replace(/[ぁあ]+/g, 'あ')
+    .trim()
+    .toLowerCase();
+  const vaguePhrases = [
+    'あ',
+    'ああ',
+    'うん',
+    'うーん',
+    'んー',
+    'なるほど',
+    'そう',
+    'そうだね',
+    'やばい',
+    'どうしよう',
+    '迷う',
+    'わからん',
+    'わからない',
+  ];
+  if (normalized.length <= 2) return true;
+  return vaguePhrases.some((phrase) => normalized === phrase);
+}
+
+function tagKind(project: MindProject, preferred: NodeKind, fallback: NodeKind = 'idea') {
+  if (project.tags.some((tag) => tag.id === preferred)) return preferred;
+  if (project.tags.some((tag) => tag.id === fallback)) return fallback;
+  return project.tags.find((tag) => tag.id !== 'theme')?.id ?? 'idea';
+}
+
+function pickSuggestionBank(
+  bank: Omit<CodexSuggestion, 'id' | 'parentId'>[],
+  project: MindProject,
+  nodeId: string,
+  countSeed: number
+) {
+  const existingTexts = new Set(
+    Object.values(project.nodes).flatMap((node) => [node.text.trim(), node.note.trim()]).filter(Boolean)
+  );
+  const uniqueBank = bank.filter(
+    (item, index, items) =>
+      items.findIndex((candidate) => `${candidate.title}::${candidate.text}` === `${item.title}::${item.text}`) === index
+  );
+  const rotated = uniqueBank.map((_, index) => uniqueBank[(index + countSeed) % uniqueBank.length]);
+  return rotated
+    .filter((item) => !existingTexts.has(item.text.trim()) && !existingTexts.has(item.title.trim()))
+    .slice(0, 3)
+    .map((item) => ({
+      ...item,
+      id: createId('suggestion'),
+      parentId: nodeId,
+    }));
+}
+
+function createLocalCodexReply(
+  project: MindProject,
+  nodeId: string,
+  userText: string,
+  messages: CodexChatMessage[] = []
+) {
   const node = project.nodes[nodeId];
   const path = getPath(project, nodeId);
   const pathText = path.map((item) => item.text).join(' > ');
-  const context = `${project.title} ${project.summary} ${pathText} ${userText}`.toLowerCase();
+  const recentText = messages
+    .slice(-6)
+    .map((message) => message.text)
+    .join(' ');
+  const context = `${project.title} ${project.summary} ${pathText} ${recentText} ${userText}`.toLowerCase();
   const focus = node?.text ?? project.title;
   const wantsResearch = context.includes('pseudogt') || context.includes('pseudo') || context.includes('yolo') || context.includes('研究');
   const wantsBusiness = context.includes('llm') || context.includes('企業') || context.includes('事業') || context.includes('顧客');
-  const kind = project.tags.some((tag) => tag.id === 'question') ? 'question' : 'idea';
+  const questionKind = tagKind(project, 'question');
+  const ideaKind = tagKind(project, 'idea');
+  const riskKind = tagKind(project, 'risk', ideaKind);
+  const evidenceKind = tagKind(project, 'evidence', ideaKind);
+  const memoKind = tagKind(project, 'memo', ideaKind);
 
-  const suggestions: CodexSuggestion[] = wantsResearch
-    ? [
-        {
-          id: createId('suggestion'),
-          title: '既存手法との差分を切る',
-          text: '既存手法との差分',
-          note: 'self-training、teacher-student、confidence thresholdingと比較し、どこに新規性を置くかを分ける。',
-          kind,
-          display: 'node',
-          parentId: nodeId,
-        },
-        {
-          id: createId('suggestion'),
-          title: '失敗パターンを集める',
-          text: '失敗パターンの分類',
-          note: '小物体、遮蔽、ドメインシフト、誤検出、boxずれを分けて、改善が効く場所を見つける。',
-          kind: 'risk',
-          display: 'node',
-          parentId: nodeId,
-        },
-        {
-          id: createId('suggestion'),
-          title: '評価指標を決める',
-          text: '評価指標メモ\nmAPだけでなく、pseudo label precision/recall、box IoU、クラス別誤ラベル率を見る。',
-          note: '疑似GTそのものの品質と最終モデル性能を分けて評価する。',
-          kind: 'memo',
-          display: 'memo',
-          parentId: nodeId,
-        },
-      ]
-    : wantsBusiness
-      ? [
-          {
-            id: createId('suggestion'),
-            title: '最初の顧客を絞る',
-            text: '最初の顧客セグメント',
-            note: '誰が、どの作業で、どのくらい損しているかを1つに絞る。',
-            kind,
-            display: 'node',
-            parentId: nodeId,
-          },
-          {
-            id: createId('suggestion'),
-            title: '代替手段との差分',
-            text: '代替手段との差分',
-            note: 'ChatGPT単体、既存SaaS、BPO、社内マクロと比べて勝てる理由を書く。',
-            kind: 'idea',
-            display: 'node',
-            parentId: nodeId,
-          },
-          {
-            id: createId('suggestion'),
-            title: 'PoC指標',
-            text: 'PoC指標メモ\n作業時間削減率、一次回答の採用率、修正回数、レビュー時間を測る。',
-            note: '便利さではなく、意思決定できる数字に落とす。',
-            kind: 'memo',
-            display: 'memo',
-            parentId: nodeId,
-          },
-        ]
-      : [
-          {
-            id: createId('suggestion'),
-            title: '前提仮説',
-            text: '前提仮説',
-            note: 'この枝が成り立つために暗黙に置いている前提を1つ書く。',
-            kind,
-            display: 'node',
-            parentId: nodeId,
-          },
-          {
-            id: createId('suggestion'),
-            title: '次の検証',
-            text: '次の検証方法',
-            note: '観察、実験、比較、ヒアリングのどれで確かめるかを決める。',
-            kind: 'evidence',
-            display: 'node',
-            parentId: nodeId,
-          },
-          {
-            id: createId('suggestion'),
-            title: '迷いのメモ',
-            text: `迷いの整理\nいま迷っている中心は「${focus}」。薄い枝は、前提・反証条件・評価方法のどれか。`,
-            note: '会話から見えた迷いをそのままメモにする。',
-            kind: 'memo',
-            display: 'memo',
-            parentId: nodeId,
-          },
-        ];
+  if (isVagueCodexInput(userText)) {
+    return {
+      text: `うん、今の入力だけだとまだ判断しきれない。いま迷っているのは「${focus}」の、既存手法・実験設計・評価指標・リスクのどれに近い？ そこだけ教えてくれたら、次に伸ばす枝を絞って提案する。`,
+      suggestions: [],
+    };
+  }
+
+  const asksEvaluation = /評価|指標|metric|mAP|精度|検証/.test(context);
+  const asksRisk = /リスク|失敗|不安|弱点|問題|懸念/.test(context);
+  const asksExperiment = /実験|ablation|アブレーション|試す|検証/.test(context);
+  const asksExisting = /既存|関連|論文|手法|比較|先行/.test(context);
+
+  const researchBank: Omit<CodexSuggestion, 'id' | 'parentId'>[] = [
+    {
+      title: '既存手法との差分',
+      text: '既存手法との差分',
+      note: 'self-training、teacher-student、confidence thresholdingと比較し、どこに新規性を置くかを分ける。',
+      kind: questionKind,
+      display: 'node',
+    },
+    {
+      title: '疑似GTの失敗パターン',
+      text: '疑似GTの失敗パターン',
+      note: '小物体、遮蔽、ドメインシフト、誤検出、boxずれを分けて、改善が効く場所を見つける。',
+      kind: riskKind,
+      display: 'node',
+    },
+    {
+      title: '評価指標メモ',
+      text: '評価指標メモ\nmAPだけでなく、pseudo label precision/recall、box IoU、クラス別誤ラベル率を見る。',
+      note: '疑似GTそのものの品質と最終モデル性能を分けて評価する。',
+      kind: memoKind,
+      display: 'memo',
+    },
+    {
+      title: '最小アブレーション',
+      text: '最小アブレーション設計',
+      note: '固定閾値、class-wise threshold、TTA、ensemble、box refinementを順番に足して比較する。',
+      kind: evidenceKind,
+      display: 'node',
+    },
+    {
+      title: 'データ分布の切り口',
+      text: 'データ分布の切り口',
+      note: '対象物サイズ、クラス頻度、撮影環境、遮蔽率で分け、pseudoGTが壊れる条件を見る。',
+      kind: ideaKind,
+      display: 'node',
+    },
+    {
+      title: '論文検索キーワード',
+      text: '論文検索キーワード\npseudo-label object detection / noisy pseudo ground truth / teacher-student detection / confidence calibration YOLO',
+      note: '調査を始めるための検索語を枝として残す。',
+      kind: memoKind,
+      display: 'memo',
+    },
+  ];
+
+  const businessBank: Omit<CodexSuggestion, 'id' | 'parentId'>[] = [
+    {
+      title: '最初の顧客セグメント',
+      text: '最初の顧客セグメント',
+      note: '誰が、どの作業で、どのくらい損しているかを1つに絞る。',
+      kind: questionKind,
+      display: 'node',
+    },
+    {
+      title: '代替手段との差分',
+      text: '代替手段との差分',
+      note: 'ChatGPT単体、既存SaaS、BPO、社内マクロと比べて勝てる理由を書く。',
+      kind: ideaKind,
+      display: 'node',
+    },
+    {
+      title: 'PoC指標メモ',
+      text: 'PoC指標メモ\n作業時間削減率、一次回答の採用率、修正回数、レビュー時間を測る。',
+      note: '便利さではなく、意思決定できる数字に落とす。',
+      kind: memoKind,
+      display: 'memo',
+    },
+    {
+      title: '導入障壁',
+      text: '導入障壁',
+      note: '権限管理、既存業務フロー、データ持ち出し、費用対効果説明のどこが詰まるかを見る。',
+      kind: riskKind,
+      display: 'node',
+    },
+    {
+      title: '最小ワークフロー',
+      text: '最小ワークフロー',
+      note: '入力と出力が明確な1業務だけに閉じ、初回価値が出るかを検証する。',
+      kind: evidenceKind,
+      display: 'node',
+    },
+  ];
+
+  const generalBank: Omit<CodexSuggestion, 'id' | 'parentId'>[] = [
+    {
+      title: '前提仮説',
+      text: '前提仮説',
+      note: 'この枝が成り立つために暗黙に置いている前提を1つ書く。',
+      kind: questionKind,
+      display: 'node',
+    },
+    {
+      title: '反証条件',
+      text: '反証条件',
+      note: 'どんな結果が出たら、この枝の考えを捨てるべきかを先に決める。',
+      kind: riskKind,
+      display: 'node',
+    },
+    {
+      title: '次の検証方法',
+      text: '次の検証方法',
+      note: '観察、実験、比較、ヒアリングのどれで確かめるかを決める。',
+      kind: evidenceKind,
+      display: 'node',
+    },
+    {
+      title: '比較対象',
+      text: '比較対象',
+      note: '既存手法、既存サービス、手作業、何もしない場合のどれと比べるかを書く。',
+      kind: ideaKind,
+      display: 'node',
+    },
+    {
+      title: '迷いの整理メモ',
+      text: `迷いの整理\nいま迷っている中心は「${focus}」。薄い枝は、前提・反証条件・評価方法のどれか。`,
+      note: '会話から見えた迷いをそのままメモにする。',
+      kind: memoKind,
+      display: 'memo',
+    },
+  ];
+
+  const baseBank = wantsResearch ? researchBank : wantsBusiness ? businessBank : generalBank;
+  const priorityBank = [
+    ...(asksExisting ? baseBank.filter((item) => /既存|比較|論文|検索|手法/.test(`${item.title} ${item.text}`)) : []),
+    ...(asksEvaluation ? baseBank.filter((item) => /評価|指標|PoC|検証/.test(`${item.title} ${item.text}`)) : []),
+    ...(asksRisk ? baseBank.filter((item) => /失敗|リスク|障壁|反証/.test(`${item.title} ${item.text}`)) : []),
+    ...(asksExperiment ? baseBank.filter((item) => /実験|アブレーション|検証|ワークフロー/.test(`${item.title} ${item.text}`)) : []),
+    ...baseBank,
+  ];
+  const seed = messages.filter((message) => message.role === 'user').length + (node?.children.length ?? 0);
+  const suggestions = pickSuggestionBank(priorityBank, project, nodeId, seed);
+  const answerLead = asksExisting
+    ? '今は既存比較の枝を先に作ると、以降の新規性がかなり見えやすくなる。'
+    : asksEvaluation
+      ? '今は評価指標を先に置いたほうがよさそう。何を改善したと言えるかを決めると、手法案が散らばりにくい。'
+      : asksRisk
+        ? '今はリスクを明示したほうがよさそう。失敗条件を置くと、そのまま検証計画に接続できる。'
+        : asksExperiment
+          ? '今は小さい実験に落とすのがよさそう。まず比較できる最小セットを置くと次の作業に移りやすい。'
+          : `今の話なら「${focus}」の直下に、前提・比較・検証のどれかを置くと整理しやすい。`;
 
   return {
-    text: `今の迷いは「${focus}」の次を、調査・検証・リスクのどこに伸ばすかに見える。まずは1つだけ決めるなら、選択中ノードの直下に「比較対象」か「評価方法」を置くのがよさそう。下の候補から1つ追加して、そこを起点にさらに聞くとツリーが散らばりにくい。`,
+    text: `${answerLead} 下の候補は、今の入力と選択中ノードに寄せて出している。違う方向で考えたいなら「実験寄り」「リスク寄り」みたいに言ってくれたら切り替える。`,
     suggestions,
   };
 }
@@ -1352,7 +1484,7 @@ export default function MindmapHome() {
         openAiKey
       );
     } catch {
-      reply = createLocalCodexReply(selectedProject, selectedNode.id, text);
+      reply = createLocalCodexReply(selectedProject, selectedNode.id, text, optimisticConversation.messages);
       usedLocal = true;
     }
 
